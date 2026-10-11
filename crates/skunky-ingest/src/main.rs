@@ -14,7 +14,7 @@ use skunky_ingest::{
     dashboard_writer, entity_classifier, epitope_registry, error, federation, fleet,
     inflammatory, ingestion_observer, lysogeny, membrane_stack,
     rpc, abuse_reporter, bloom_sensor, scatter_server, signal_spine,
-    signal_writer, threat_feed,
+    threat_feed,
 };
 
 use error::IngestError;
@@ -125,19 +125,9 @@ struct Cli {
     #[arg(long, default_value_t = 100)]
     max_tarpit_connections: u32,
 
-    /// Enable signal data writer — replaces gen-signal-data.py cron.
-    /// Accumulates bloom sensor data and writes signal-data.js periodically.
-    #[arg(long, default_value_t = false)]
-    signal_writer: bool,
-
-    /// Output path for signal-data.js (used with --signal-writer).
-    #[arg(long, default_value = "/opt/ecoPrimals/signal/site/public/js/signal-data.js")]
-    signal_data_path: PathBuf,
-
-    /// State file for signal writer cumulative history.
-    /// Persistent storage — survives reboots (sourdough culture).
-    #[arg(long, default_value = "/var/lib/skunky-ingest/signal-writer-state.json")]
-    signal_state_path: PathBuf,
+    // signal_writer: fossilized (Wave 170 → fossilRecord/signal-writer-rust-wave170)
+    // --signal-writer, --signal-data-path, --signal-state-path removed.
+    // dashboard_writer superseded it; signal-data.js was orphaned.
 
     /// Enable entity topology writer — replaces entity_topology.py cron.
     /// Classifies traffic entities and writes topology.json periodically.
@@ -497,18 +487,8 @@ async fn run(cli: Cli) -> Result<(), IngestError> {
     let bloom_signal_path = PathBuf::from("/run/membrane/bloom.signal");
     tracing::info!("🌸 bloom sensor active — afferent signal accumulation");
 
-    // Signal writer — replaces gen-signal-data.py (559 lines of Python → 0)
-    // Writes signal-data.js every 5 bloom windows (~5 min at 60s windows).
-    let mut signal_acc = if cli.signal_writer {
-        tracing::info!("📡 signal writer active — gen-signal-data.py convergence");
-        Some(signal_writer::SignalAccumulator::new(
-            cli.signal_data_path.clone(),
-            cli.signal_state_path.clone(),
-            5,
-        ))
-    } else {
-        None
-    };
+    // signal_writer fossilized (Wave 170 → fossilRecord/signal-writer-rust-wave170).
+    // dashboard_writer superseded it; signal-data.js was orphaned.
 
     // Epitope registry — culture-derived bot detection (replaces hardcoded is_declared_bot).
     // Loads sourdough culture + OSINT feed, evolves with topology observations.
@@ -700,7 +680,6 @@ async fn run(cli: Cli) -> Result<(), IngestError> {
                     &abuse_queue,
                     cli.window_secs,
                     &opsonize_cache,
-                    signal_acc.as_mut(),
                     topology_writer.as_mut(),
                     dashboard_writer.as_mut(),
                     Some(&oracle),
@@ -790,12 +769,7 @@ async fn run(cli: Cli) -> Result<(), IngestError> {
         );
         write_bloom_signal(&bloom_signal_path, &obs).await;
 
-        // Signal writer — final flush
-        if let Some(ref mut acc) = signal_acc {
-            acc.ingest(&obs);
-            acc.flush();
-            tracing::info!("📡 signal writer final flush");
-        }
+        // signal_writer: fossilized (Wave 170)
 
         // Feed the final observation into the spine before shutdown.
         if let Some(spine_entry) = signal_spine.ingest(&obs) {

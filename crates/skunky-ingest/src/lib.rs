@@ -55,7 +55,9 @@ pub mod scatter_server;
 pub mod scatter_temporal;
 pub mod scyborg_prism;
 pub mod signal_spine;
-pub mod signal_writer;
+// fossilized: signal_writer (Wave 170 → fossilRecord/signal-writer-rust-wave170)
+// Replaced gen-signal-data.py, then superseded by dashboard_writer.
+// Output (signal-data.js) was orphaned when signal-exploration.js was deleted.
 pub mod sort_compression;
 pub(crate) mod squirrel_announce;
 // dormant: plasmid (Wave 171 — behavioral tokens, tests only; ConservedPlasmid in scatter_types is live)

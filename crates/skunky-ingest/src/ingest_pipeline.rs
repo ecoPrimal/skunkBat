@@ -6,7 +6,7 @@
 use skunky_ingest::{
     abuse_reporter, aggregator, bloom_sensor, caddy, caddy_bridge, dashboard_writer,
     entity_classifier, fleet, lysogeny, rpc, scatter_server, signal_spine,
-    signal_writer, threat_feed,
+    threat_feed,
 };
 
 use cellmembrane_types::fleet::DefensePosture;
@@ -63,7 +63,7 @@ pub(crate) async fn process_line(
     abuse_queue: &abuse_reporter::AbuseReportQueue,
     window_secs: u64,
     opsonize_cache: &scatter_server::OpsonizeCache,
-    mut signal_acc: Option<&mut signal_writer::SignalAccumulator>,
+    // signal_acc: fossilized (Wave 170 → fossilRecord/signal-writer-rust-wave170)
     mut topology_writer: Option<&mut entity_classifier::TopologyWriter>,
     mut dashboard: Option<&mut dashboard_writer::DashboardWriter>,
     oracle: Option<&skunky_ingest::cube_oracle::SharedOracle>,
@@ -120,10 +120,7 @@ pub(crate) async fn process_line(
             }
         }
 
-        // Signal writer — accumulate for signal-data.js output.
-        if let Some(acc) = signal_acc.as_mut() {
-            acc.ingest(&obs);
-        }
+        // signal_writer: fossilized (Wave 170). dashboard_writer superseded it.
 
         // Signal spine — chain the observation into immune memory.
         if let Some(spine_entry) = spine.ingest(&obs) {
