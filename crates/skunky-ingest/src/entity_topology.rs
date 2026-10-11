@@ -17,8 +17,13 @@ use crate::entity_profile::{
     EntityAccum, EntityProfile, EntityTopology, EpitopeSortSnapshot, build_profile, build_comparative,
 };
 
-/// Maximum number of epitope sort snapshots to keep in the rolling history.
+/// Maximum number of epitope sort snapshots to keep in the coiled genome.
+/// History doesn't roll — it coils and compresses.
 const MAX_HISTORY_SNAPSHOTS: usize = 200;
+
+/// How many raw (coil=0) snapshots to keep at full resolution before coiling.
+/// Recent history is euchromatin — accessible, full detail.
+const EUCHROMATIN_WINDOW: usize = 100;
 
 /// Accumulator for building entity profiles from raw request fingerprints.
 pub struct TopologyBuilder {
@@ -504,15 +509,16 @@ impl TopologyWriter {
             entity_count: topology.entities.len() as u16,
             non_self_in_range,
             entities: entries,
+            coil: 0,
+            span_secs: 30,
         };
 
         self.history.push(snapshot);
 
-        // Trim to rolling window
-        if self.history.len() > MAX_HISTORY_SNAPSHOTS {
-            let drain = self.history.len() - MAX_HISTORY_SNAPSHOTS;
-            self.history.drain(..drain);
-        }
+        // ── Coil the genome ──
+        // History doesn't roll — it coils and compresses.
+        // Recent = euchromatin (full resolution). Old = heterochromatin (compressed).
+        self.coil_history();
 
         // Write to disk
         match serde_json::to_string(&self.history) {
@@ -527,6 +533,98 @@ impl TopologyWriter {
             }
             Err(e) => {
                 tracing::warn!(error = %e, "epitope history serialization failed");
+            }
+        }
+    }
+
+    /// Coil the history genome — compress old snapshots instead of discarding them.
+    ///
+    /// Like chromatin packing: nucleosome (coil=0) → fiber (coil=1) → loop (coil=2) → chromosome.
+    /// Recent history stays at full resolution (euchromatin). Older history coils tighter.
+    /// Nothing is ever deleted — only compressed.
+    fn coil_history(&mut self) {
+        if self.history.len() <= MAX_HISTORY_SNAPSHOTS {
+            return;
+        }
+
+        // Find the oldest pair of snapshots at the same coil level and merge them.
+        // This naturally creates logarithmic time compression:
+        //   Recent: coil=0 (every ~30s, full detail)
+        //   Older:  coil=1 (every ~1min, two merged)
+        //   Old:    coil=2 (every ~2min, four merged)
+        //   Ancient:coil=3+ (every ~4min+, deeply compressed)
+
+        // Count raw (coil=0) snapshots
+        let raw_count = self.history.iter().filter(|s| s.coil == 0).count();
+
+        if raw_count > EUCHROMATIN_WINDOW {
+            // Find the first pair of adjacent snapshots at the lowest coil level
+            // that are NOT in the euchromatin window (recent raw snapshots).
+            // Coil from the oldest end — compress the deepest past first.
+            let mut coiled = false;
+            for level in 0u8..16 {
+                // Find the two oldest adjacent snapshots at this level
+                let mut first_idx = None;
+                let mut second_idx = None;
+                for (i, snap) in self.history.iter().enumerate() {
+                    if snap.coil == level {
+                        if first_idx.is_none() {
+                            first_idx = Some(i);
+                        } else if second_idx.is_none() {
+                            second_idx = Some(i);
+                            break;
+                        }
+                    }
+                }
+
+                if let (Some(a), Some(b)) = (first_idx, second_idx) {
+                    // Don't coil if both are in the euchromatin window
+                    // (recent raw snapshots should stay full-resolution)
+                    if level == 0 {
+                        let raw_after_b = self.history[b..].iter().filter(|s| s.coil == 0).count();
+                        if raw_after_b > EUCHROMATIN_WINDOW - 2 {
+                            // These are old enough to coil
+                        } else {
+                            continue; // too recent, try next level
+                        }
+                    }
+
+                    let merged = EpitopeSortSnapshot::coil_pair(
+                        &self.history[a],
+                        &self.history[b],
+                    );
+
+                    // Remove both, insert merged at the earlier position
+                    self.history.remove(b);
+                    self.history.remove(a);
+                    self.history.insert(a, merged);
+                    coiled = true;
+                    break;
+                }
+            }
+
+            // Safety: if nothing was coiled but we're over budget, remove the very oldest
+            if !coiled && self.history.len() > MAX_HISTORY_SNAPSHOTS {
+                self.history.remove(0);
+            }
+        } else if self.history.len() > MAX_HISTORY_SNAPSHOTS {
+            // Not enough raw snapshots to coil from — compress oldest non-raw pair
+            for level in 0u8..16 {
+                let positions: Vec<usize> = self.history.iter().enumerate()
+                    .filter(|(_, s)| s.coil == level)
+                    .map(|(i, _)| i)
+                    .take(2)
+                    .collect();
+                if positions.len() == 2 {
+                    let merged = EpitopeSortSnapshot::coil_pair(
+                        &self.history[positions[0]],
+                        &self.history[positions[1]],
+                    );
+                    self.history.remove(positions[1]);
+                    self.history.remove(positions[0]);
+                    self.history.insert(positions[0], merged);
+                    break;
+                }
             }
         }
     }

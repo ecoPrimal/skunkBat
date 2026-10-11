@@ -884,9 +884,11 @@ pub struct EntitySortEntry {
 
 /// One snapshot of the full epitope sort — the organism's view at a moment in time.
 ///
-/// Appended to `epitope-history.json` as a rolling buffer. Each flush of
-/// `TopologyWriter` produces one snapshot. The organism accumulates WAS
-/// from a stream of IS snapshots.
+/// History doesn't roll — it coils and compresses, like a genome.
+/// Recent snapshots are euchromatin (full resolution, accessible).
+/// Older snapshots are heterochromatin (coiled, compressed, but still there).
+/// Each coil level merges two adjacent snapshots, doubling the time span
+/// while halving the resolution. The chain of WAS is the organism's genome.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct EpitopeSortSnapshot {
     /// Unix epoch seconds.
@@ -901,6 +903,50 @@ pub struct EpitopeSortSnapshot {
     pub non_self_in_range: u16,
     /// Compact per-entity state, sorted by fleet_confidence ascending.
     pub entities: Vec<EntitySortEntry>,
+    /// Coil level — how many times this snapshot has been compressed.
+    /// 0 = raw (euchromatin). 1 = two merged. 2 = four merged. N = 2^N merged.
+    /// Like chromatin packing: nucleosome → fiber → loop → chromosome.
+    #[serde(default)]
+    pub coil: u8,
+    /// Time span in seconds this snapshot covers (for coiled snapshots).
+    /// Raw snapshots: ~30s. Coil 1: ~60s. Coil N: ~30 * 2^N seconds.
+    #[serde(default)]
+    pub span_secs: u64,
+}
+
+impl EpitopeSortSnapshot {
+    /// Coil two adjacent snapshots into one — compressing history like DNA packing.
+    ///
+    /// The newer snapshot's entities are kept (IS wins over WAS).
+    /// Population statistics are averaged. The coil level increments.
+    /// Time span doubles. Timestamp is the newer one (the IS of the pair).
+    pub fn coil_pair(older: &EpitopeSortSnapshot, newer: &EpitopeSortSnapshot) -> EpitopeSortSnapshot {
+        let coil = older.coil.max(newer.coil) + 1;
+        let span = older.span_secs + newer.span_secs;
+
+        // Entity merge: keep newer entities, but update any entity that existed
+        // in older but not newer (it left range — record its last known state).
+        let mut entity_map: std::collections::HashMap<String, EntitySortEntry> = std::collections::HashMap::new();
+        for e in &older.entities {
+            entity_map.insert(e.entity.clone(), e.clone());
+        }
+        for e in &newer.entities {
+            entity_map.insert(e.entity.clone(), e.clone());
+        }
+        let mut entities: Vec<EntitySortEntry> = entity_map.into_values().collect();
+        entities.sort_by(|a, b| a.fc.partial_cmp(&b.fc).unwrap_or(std::cmp::Ordering::Equal));
+
+        EpitopeSortSnapshot {
+            ts: newer.ts,
+            iso: newer.iso.clone(),
+            total_requests: newer.total_requests,
+            entity_count: entities.len() as u16,
+            non_self_in_range: ((older.non_self_in_range as u32 + newer.non_self_in_range as u32) / 2) as u16,
+            entities,
+            coil,
+            span_secs: span,
+        }
+    }
 }
 
 impl EntityProfile {
@@ -1119,6 +1165,8 @@ mod tests {
             total_requests: 100_000,
             entity_count: 3,
             non_self_in_range: 2,
+            coil: 0,
+            span_secs: 30,
             entities: vec![
                 EntitySortEntry {
                     entity: "human_browser".to_string(),
@@ -1182,5 +1230,41 @@ mod tests {
         };
         let json = serde_json::to_string(&entry).unwrap();
         assert!(!json.contains("\"surfaces\""), "empty surfaces should be skipped");
+    }
+
+    #[test]
+    fn coil_pair_compresses_history() {
+        let make_entry = |name: &str, reqs: u64, fc: f32| EntitySortEntry {
+            entity: name.to_string(), reqs, ips: 1, fc, vit: 0.0, neg: 0.0,
+            sort_key: [0;6], compression: 0, triggered: 0, evaluated: 0,
+            surfaces: vec![], d_eff: 1.0, focal_distance: 0.5642, im_p: 0.0,
+        };
+
+        let older = EpitopeSortSnapshot {
+            ts: 1000, iso: "T1".into(), total_requests: 500, entity_count: 2,
+            non_self_in_range: 2, coil: 0, span_secs: 30,
+            entities: vec![make_entry("alpha", 300, 20.0), make_entry("beta", 200, 60.0)],
+        };
+        let newer = EpitopeSortSnapshot {
+            ts: 1030, iso: "T2".into(), total_requests: 600, entity_count: 2,
+            non_self_in_range: 4, coil: 0, span_secs: 30,
+            entities: vec![make_entry("alpha", 350, 22.0), make_entry("gamma", 250, 10.0)],
+        };
+
+        let coiled = EpitopeSortSnapshot::coil_pair(&older, &newer);
+
+        // Coil level increments
+        assert_eq!(coiled.coil, 1);
+        // Span doubles
+        assert_eq!(coiled.span_secs, 60);
+        // Timestamp is from the newer (IS)
+        assert_eq!(coiled.ts, 1030);
+        // non_self_in_range is averaged
+        assert_eq!(coiled.non_self_in_range, 3); // (2+4)/2
+        // All entities from both are kept (union)
+        assert_eq!(coiled.entities.len(), 3); // alpha, beta, gamma
+        // alpha's state is from the newer snapshot (IS wins)
+        let alpha = coiled.entities.iter().find(|e| e.entity == "alpha").unwrap();
+        assert_eq!(alpha.reqs, 350);
     }
 }
