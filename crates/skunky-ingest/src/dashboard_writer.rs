@@ -838,19 +838,35 @@ fn epitope_triggered_counts(culture: &DashboardCulture) -> [usize; 6] {
     counts
 }
 
-/// Sweep 2 trajectory analysis — what arcs do returning visitors trace?
+/// Trajectory analysis — compress arcs through the epitope ring.
 ///
-/// For each IP that visited >1 subdomain, we record the set of hosts.
-/// The trajectory is the rotation (how many subdomains), direction
-/// (which cluster), and distance (how many requests per subdomain).
+/// Sweep 1 sorted requests by behavioral epitope (point of contact).
+/// Sweep 2 sorts trajectories by orbital epitope (arc through subdomains).
+///
+/// The compression: instead of listing 3,563 individual multi-host arcs,
+/// hash each arc's subdomain set into an orbital epitope. IPs that visit
+/// the same set of subdomains are in the same orbital family. The families
+/// ARE the compressed trajectories.
+///
+/// ```text
+/// H(trajectory|orbital_epitope) < H(trajectory|alphabetic) < H(trajectory)
+/// ```
 fn trajectory_analysis(culture: &DashboardCulture) -> serde_json::Value {
+    use std::collections::BTreeSet;
+    use std::hash::{Hash, Hasher};
+
     let mut multi_host_ips: usize = 0;
     let mut single_host_ips: usize = 0;
     let mut host_visit_counts: HashMap<String, usize> = HashMap::new();
     let mut max_breadth: usize = 0;
     let mut breadth_sum: usize = 0;
 
-    // Count cross-subdomain trajectories
+    // Orbital epitope: hash of the sorted subdomain set for each IP.
+    // IPs with identical subdomain sets share an orbital epitope.
+    let mut orbital_families: HashMap<String, Vec<u64>> = HashMap::new();
+    // Track the host-set for each orbital hash so we can display it
+    let mut orbital_hostsets: HashMap<String, BTreeSet<String>> = HashMap::new();
+
     for (ip_h, hosts) in &culture.ip_hosts {
         if hosts.len() > 1 {
             multi_host_ips += 1;
@@ -861,13 +877,24 @@ fn trajectory_analysis(culture: &DashboardCulture) -> serde_json::Value {
             for h in hosts {
                 *host_visit_counts.entry(h.clone()).or_insert(0) += 1;
             }
+
+            // Compute orbital epitope hash: sorted host set → deterministic hash
+            let sorted_hosts: BTreeSet<&str> = hosts.iter().map(|s| s.as_str()).collect();
+            let mut hasher = std::collections::hash_map::DefaultHasher::new();
+            for h in &sorted_hosts {
+                h.hash(&mut hasher);
+            }
+            let orbit_hash = format!("orb-{:08x}", hasher.finish() as u32);
+
+            orbital_families.entry(orbit_hash.clone()).or_default().push(*ip_h);
+            orbital_hostsets.entry(orbit_hash).or_default()
+                .extend(hosts.iter().cloned());
         } else {
             single_host_ips += 1;
         }
-        let _ = ip_h; // keyed by hash, no raw IP
     }
 
-    // Top cross-visited hosts (which subdomains appear in multi-host trajectories)
+    // Top cross-visited hosts
     let mut top_hosts: Vec<(String, usize)> = host_visit_counts.into_iter().collect();
     top_hosts.sort_by(|a, b| b.1.cmp(&a.1));
     top_hosts.truncate(10);
@@ -878,13 +905,44 @@ fn trajectory_analysis(culture: &DashboardCulture) -> serde_json::Value {
         0.0
     };
 
-    // Returning visitor trajectory (WAS sweep)
+    // Returning visitor arcs
     let returning_with_arc: usize = culture.ips.values()
         .filter(|p| p.requests > 1 && p.host_count > 1)
         .count();
     let returning_single: usize = culture.ips.values()
         .filter(|p| p.requests > 1 && p.host_count <= 1)
         .count();
+
+    // Orbital compression: how many families compress the multi-host population?
+    let total_families = orbital_families.len();
+    let alpha_bits = if multi_host_ips > 1 {
+        (multi_host_ips as f64).ln() / std::f64::consts::LN_2
+    } else { 0.0 };
+    let orbital_bits = if total_families > 1 {
+        (total_families as f64).ln() / std::f64::consts::LN_2
+    } else { 0.0 };
+    let orbital_gain = (alpha_bits - orbital_bits).max(0.0);
+
+    // Top orbital families by population
+    let mut families_sorted: Vec<(&str, usize)> = orbital_families.iter()
+        .map(|(k, v)| (k.as_str(), v.len()))
+        .collect();
+    families_sorted.sort_by(|a, b| b.1.cmp(&a.1));
+
+    let top_orbits: Vec<serde_json::Value> = families_sorted.iter()
+        .take(8)
+        .map(|(hash, count)| {
+            let hosts = orbital_hostsets.get(*hash)
+                .map(|s| s.iter().cloned().collect::<Vec<_>>())
+                .unwrap_or_default();
+            serde_json::json!({
+                "orbit": hash,
+                "ips": count,
+                "breadth": hosts.len(),
+                "hosts": hosts,
+            })
+        })
+        .collect();
 
     serde_json::json!({
         "multi_host_ips": multi_host_ips,
@@ -893,6 +951,16 @@ fn trajectory_analysis(culture: &DashboardCulture) -> serde_json::Value {
         "avg_breadth": (avg_breadth * 10.0).round() / 10.0,
         "returning_with_arc": returning_with_arc,
         "returning_single_surface": returning_single,
+        "orbital_compression": {
+            "families": total_families,
+            "alpha_bits": (alpha_bits * 10.0).round() / 10.0,
+            "orbital_bits": (orbital_bits * 10.0).round() / 10.0,
+            "gain_bits": (orbital_gain * 10.0).round() / 10.0,
+            "ratio": if alpha_bits > 0.0 {
+                (orbital_gain / alpha_bits * 1000.0).round() / 1000.0
+            } else { 0.0 },
+        },
+        "top_orbits": top_orbits,
         "top_cross_hosts": top_hosts.iter()
             .map(|(h, c)| serde_json::json!({"host": h, "cross_visits": c}))
             .collect::<Vec<_>>(),
