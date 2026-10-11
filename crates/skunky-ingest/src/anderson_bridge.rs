@@ -31,7 +31,7 @@ use std::sync::Arc;
 use serde::Serialize;
 use tokio::sync::RwLock;
 
-use crate::dashboard_writer::{IpProfile, TrioClass, score_trio};
+use crate::dashboard_profile::{IpProfile, TrioClass, score_trio};
 
 /// Shared Anderson profile — updated by DashboardWriter, read by scatter server.
 pub type SharedAndersonProfile = Arc<RwLock<Option<AndersonProfile>>>;

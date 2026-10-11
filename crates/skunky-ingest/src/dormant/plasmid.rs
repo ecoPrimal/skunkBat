@@ -185,7 +185,7 @@ const MIN_CURIOSITY: f32 = 0.15;
 ///
 /// The plasmid is self-sovereign — it belongs to the entity, not the system.
 pub fn generate_plasmid(
-    profile: &crate::dashboard_writer::IpProfile,
+    profile: &crate::dashboard_profile::IpProfile,
     epitope_hash: &str,
 ) -> Option<Plasmid> {
     if profile.requests < MIN_OBSERVATIONS {
@@ -458,7 +458,7 @@ fn now_unix() -> f64 {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::dashboard_writer::IpProfile;
+    use crate::dashboard_profile::IpProfile;
     use std::collections::HashMap;
 
     fn human_profile() -> IpProfile {

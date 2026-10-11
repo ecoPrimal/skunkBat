@@ -397,8 +397,11 @@ pub fn is_declared_bot(ua: &str) -> bool {
 }
 
 pub use crate::entity_profile::{
-    build_comparative, ComparativeRow, EntityProfile, EntityTopology, EpitopeResult,
-    EpitopeScores, HeaderFingerprint, IpRotation, SubSystem, TimingProfile,
+    EntityProfile, EpitopeResult, EpitopeScores, HeaderFingerprint,
+    IpRotation, SubSystem, TimingProfile,
+};
+pub use crate::entity_sort::{
+    build_comparative, ComparativeRow, EntityTopology,
 };
 pub use crate::entity_topology::{TopologyBuilder, TopologyWriter};
 

@@ -14,7 +14,10 @@ use std::path::{Path, PathBuf};
 use crate::caddy;
 use crate::entity_classifier::{EntityId, RequestFingerprint, classify, classify_with_registry};
 use crate::entity_profile::{
-    EntityAccum, EntityProfile, EntityTopology, EpitopeSortSnapshot, build_profile, build_comparative,
+    EntityAccum, EntityProfile, build_profile,
+};
+use crate::entity_sort::{
+    EntityTopology, EpitopeSortSnapshot, build_comparative,
 };
 
 /// Maximum number of epitope sort snapshots to keep in the coiled genome.
@@ -115,7 +118,7 @@ impl TopologyBuilder {
     fn ingest_classified(&mut self, fp: &RequestFingerprint, entity_id: EntityId) {
         let accum = self.entities.entry(entity_id).or_insert_with(EntityAccum::new);
 
-        accum.ip_hashes.insert(crate::dashboard_writer::hash_ip(&fp.ip));
+        accum.ip_hashes.insert(crate::dashboard_profile::hash_ip(&fp.ip));
         accum.subnets.insert(fp.subnet());
         accum.uas.insert(fp.user_agent.clone());
         accum.timestamps.push(fp.timestamp);
@@ -133,7 +136,7 @@ impl TopologyBuilder {
         if let Some(repo) = fp.repo_name() {
             *accum.repos.entry(repo.clone()).or_insert(0) += 1;
             *accum.ip_repos
-                .entry(crate::dashboard_writer::hash_ip(&fp.ip))
+                .entry(crate::dashboard_profile::hash_ip(&fp.ip))
                 .or_default()
                 .entry(repo)
                 .or_insert(0) += 1;
@@ -453,7 +456,7 @@ impl TopologyWriter {
     ///   d_eff(E) = count of surfaces where reqs > 0
     ///   focal_distance(E) = 1/pi^(d_eff/2) (Paper 53)
     fn append_history_snapshot(&mut self, topology: &EntityTopology) {
-        use crate::entity_profile::SurfaceMomentum;
+        use crate::entity_sort::SurfaceMomentum;
 
         let total_reqs = topology.log_entries_analyzed as f64;
 

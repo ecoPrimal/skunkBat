@@ -24,7 +24,7 @@
 use std::collections::BTreeMap;
 
 use cellmembrane_types::campfire::{
-    ContentDomain, SurfaceMirror, SurfaceShape, TemporalCharacter, VisitorArchetype,
+    SurfaceMirror, SurfaceShape, TemporalCharacter, VisitorArchetype,
 };
 
 use crate::entity_classifier::EntityId;
@@ -148,6 +148,7 @@ pub fn perspective_text(archetype: VisitorArchetype) -> &'static str {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use cellmembrane_types::campfire::ContentDomain;
 
     #[test]
     fn surface_name_lookup() {

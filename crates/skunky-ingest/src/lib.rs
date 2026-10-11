@@ -12,11 +12,14 @@ pub mod aperture;
 pub mod caddy;
 pub mod caddy_bridge;
 pub mod cloudflare;
+pub mod cube_grid;
 pub mod cube_oracle;
+pub mod dashboard_profile;
 pub mod dashboard_writer;
 pub mod cursor;
 pub mod entity_classifier;
 pub mod entity_profile;
+pub mod entity_sort;
 pub mod entity_topology;
 pub mod epitope_defs;
 // dormant: epitope_inversion (Wave 171 — tests only, never wired)
