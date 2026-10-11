@@ -408,6 +408,10 @@ impl TopologyWriter {
                             "🗺️ topology.json updated"
                         );
 
+                        // ── Falsification experiments (Paper 69) ──
+                        // Run coprimality and sensitivity analyses on every flush.
+                        self.run_falsification_experiments(&topology.entities);
+
                         // Campfire pipeline — write visitor/page/campfire JSON
                         // from the same entity data, in the same cycle.
                         // Replaces three Python cron scripts (807 lines).
@@ -442,6 +446,52 @@ impl TopologyWriter {
         self.culture_save_counter += 1;
         if self.culture_save_counter % 10 == 0 || self.culture_save_counter == 1 {
             self.save_culture();
+        }
+    }
+
+    /// Run Paper 69 falsification experiments on the current entity population.
+    ///
+    /// Experiments 1 (coprimality) and 2 (epitope sensitivity) are cheap enough
+    /// to run every flush cycle. Results are logged at info level.
+    fn run_falsification_experiments(&self, profiles: &[EntityProfile]) {
+        use crate::coprimality;
+        use crate::epitope_sensitivity;
+
+        // Experiment 1: coprimality
+        let coprim = coprimality::epitope_coprimality(profiles, 3);
+        tracing::info!(
+            total_pairs = coprim.total_pairs,
+            qualifying_pairs = coprim.qualifying_pairs,
+            zero_shared_frac = format!("{:.4}", coprim.zero_shared_frac).as_str(),
+            prediction = format!("{:.4}", coprim.prediction).as_str(),
+            delta = format!("{:.4}", coprim.delta).as_str(),
+            survives = coprim.claim_survives,
+            "📐 Exp1 coprimality (Claim F: 6/π²)"
+        );
+
+        // Experiment 2: sensitivity
+        let sens = epitope_sensitivity::epitope_sensitivity(profiles);
+        tracing::info!(
+            ks_5 = format!("{:.4}", sens.ks_5).as_str(),
+            ks_6 = format!("{:.4}", sens.ks_6).as_str(),
+            ks_7 = format!("{:.4}", sens.ks_7).as_str(),
+            six_is_best = sens.six_is_best,
+            survives = sens.claim_survives,
+            "📐 Exp2 sensitivity (Claim B: T(6)=21)"
+        );
+
+        // Write experiment results alongside topology.json
+        if let Some(parent) = self.output_path.parent() {
+            let exp_path = parent.join("falsification.json");
+            let data = serde_json::json!({
+                "experiment_1_coprimality": coprim,
+                "experiment_2_sensitivity": sens,
+            });
+            if let Ok(json) = serde_json::to_string_pretty(&data) {
+                if let Err(e) = std::fs::write(&exp_path, &json) {
+                    tracing::warn!(error = %e, "falsification.json write failed");
+                }
+            }
         }
     }
 
