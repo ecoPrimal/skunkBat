@@ -51,9 +51,11 @@ pub mod signal_spine;
 pub mod signal_writer;
 pub(crate) mod squirrel_announce;
 // dormant: plasmid (Wave 171 — behavioral tokens, tests only; ConservedPlasmid in scatter_types is live)
+pub mod campfire_util;
 pub mod campfire_writer;
 pub mod mirror_inbox;
 pub mod page_mirror;
 pub mod storyteller;
+pub mod surface_registry;
 pub mod threat_feed;
 pub mod visitor_archetype;

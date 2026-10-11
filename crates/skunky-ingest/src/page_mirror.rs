@@ -29,77 +29,8 @@ use cellmembrane_types::campfire::{
 
 use crate::entity_classifier::EntityId;
 use crate::entity_profile::EntityAccum;
+use crate::surface_registry;
 use crate::visitor_archetype::classify_archetype;
-
-/// Surface name map — human-readable names for surfaces.
-const SURFACE_NAMES: &[(&str, &str)] = &[
-    ("git", "Forge"),
-    ("hud", "HUD"),
-    ("detroit", "Detroit Evidence"),
-    ("signal", "Signal"),
-    ("sporeprint", "sporePrint"),
-    ("evidence", "Evidence Archive"),
-    ("monitor", "Monitor"),
-    ("cytokine", "Cytokine"),
-    ("thymus", "Thymus"),
-    ("complement", "Complement"),
-    ("lysozyme", "Lysozyme"),
-    ("interferon", "Interferon"),
-    ("epitope", "Epitope"),
-    ("antigen", "Antigen"),
-    ("receptor", "Receptor"),
-    ("opsonize", "Opsonize"),
-    ("antibody", "Antibody"),
-    ("macrophage", "Macrophage"),
-    ("bloom", "Bloom"),
-    ("beacon", "Beacon"),
-    ("cashforkids", "CashForKids"),
-    ("layer2", "Layer2"),
-    ("tuebor", "Tuebor"),
-];
-
-/// Map of surfaces to content domains.
-const DOMAIN_MAP: &[(&str, ContentDomain)] = &[
-    ("detroit", ContentDomain::Evidence),
-    ("evidence", ContentDomain::Evidence),
-    ("cashforkids", ContentDomain::Evidence),
-    ("clutch", ContentDomain::Evidence),
-    ("tuebor", ContentDomain::Evidence),
-    ("sporeprint", ContentDomain::Science),
-    ("cytokine", ContentDomain::Immune),
-    ("thymus", ContentDomain::Immune),
-    ("complement", ContentDomain::Immune),
-    ("lysozyme", ContentDomain::Immune),
-    ("interferon", ContentDomain::Immune),
-    ("epitope", ContentDomain::Immune),
-    ("antigen", ContentDomain::Immune),
-    ("receptor", ContentDomain::Immune),
-    ("opsonize", ContentDomain::Immune),
-    ("antibody", ContentDomain::Immune),
-    ("macrophage", ContentDomain::Immune),
-    ("bloom", ContentDomain::Immune),
-    ("hud", ContentDomain::Infrastructure),
-    ("signal", ContentDomain::Infrastructure),
-    ("monitor", ContentDomain::Infrastructure),
-    ("beacon", ContentDomain::Infrastructure),
-    ("git", ContentDomain::Source),
-];
-
-/// Look up the human-readable name for a surface.
-fn surface_name(key: &str) -> String {
-    SURFACE_NAMES.iter()
-        .find(|(k, _)| *k == key)
-        .map(|(_, v)| v.to_string())
-        .unwrap_or_else(|| key.to_string())
-}
-
-/// Look up the content domain for a surface.
-fn surface_domain(key: &str) -> ContentDomain {
-    DOMAIN_MAP.iter()
-        .find(|(k, _)| *k == key)
-        .map(|(_, d)| *d)
-        .unwrap_or(ContentDomain::Other)
-}
 
 /// Build surface mirrors from the entity topology data.
 ///
@@ -116,8 +47,7 @@ pub fn build_surface_mirrors(
     let mut surface_stats: BTreeMap<String, SurfaceAccum> = BTreeMap::new();
 
     for (entity_id, accum) in entities {
-        // Only include human/ghost entities in the page mirror
-        if !matches!(entity_id, EntityId::HumanBrowser | EntityId::Ghost) {
+        if !entity_id.is_human() {
             continue;
         }
 
@@ -125,9 +55,7 @@ pub fn build_surface_mirrors(
             .unwrap_or(VisitorArchetype::Visitor);
 
         for (host, &count) in &accum.hosts {
-            let surface = host.strip_suffix(".primals.eco")
-                .unwrap_or(host)
-                .to_string();
+            let surface = surface_registry::strip_host(host).to_string();
 
             let stats = surface_stats.entry(surface).or_insert_with(SurfaceAccum::new);
             stats.hits += count;
@@ -145,14 +73,14 @@ pub fn build_surface_mirrors(
         .map(|(surface, stats)| {
             let shape = classify_shape(stats.unique_pages, stats.hits);
             let temporal = TemporalCharacter::MorningKnowledge; // TODO: compute from timestamps
-            let domain = surface_domain(&surface);
+            let domain = surface_registry::surface_domain(&surface);
 
             let archetype_attraction: BTreeMap<String, usize> = stats.archetype_counts.iter()
                 .map(|(arch, &count)| (arch.to_string(), count))
                 .collect();
 
             SurfaceMirror {
-                name: surface_name(&surface),
+                name: surface_registry::surface_name(&surface).to_string(),
                 surface,
                 hits: stats.hits,
                 visitor_count: stats.visitor_count,
@@ -223,17 +151,17 @@ mod tests {
 
     #[test]
     fn surface_name_lookup() {
-        assert_eq!(surface_name("git"), "Forge");
-        assert_eq!(surface_name("detroit"), "Detroit Evidence");
-        assert_eq!(surface_name("unknown_surface"), "unknown_surface");
+        assert_eq!(surface_registry::surface_name("git"), "Forge");
+        assert_eq!(surface_registry::surface_name("detroit"), "Detroit Evidence");
+        assert_eq!(surface_registry::surface_name("unknown_surface"), "unknown_surface");
     }
 
     #[test]
     fn surface_domain_lookup() {
-        assert_eq!(surface_domain("detroit"), ContentDomain::Evidence);
-        assert_eq!(surface_domain("cytokine"), ContentDomain::Immune);
-        assert_eq!(surface_domain("git"), ContentDomain::Source);
-        assert_eq!(surface_domain("unknown"), ContentDomain::Other);
+        assert_eq!(surface_registry::surface_domain("detroit"), ContentDomain::Evidence);
+        assert_eq!(surface_registry::surface_domain("cytokine"), ContentDomain::Immune);
+        assert_eq!(surface_registry::surface_domain("git"), ContentDomain::Source);
+        assert_eq!(surface_registry::surface_domain("unknown"), ContentDomain::Other);
     }
 
     #[test]
@@ -281,7 +209,7 @@ mod tests {
             a
         };
         let mirrors = build_surface_mirrors(&[(EntityId::MetaFleet, &accum)]);
-        assert!(mirrors.is_empty(), "fleet entities should be excluded");
+        assert!(mirrors.is_empty(), "fleet entities should be excluded (is_human=false)");
     }
 
     #[test]

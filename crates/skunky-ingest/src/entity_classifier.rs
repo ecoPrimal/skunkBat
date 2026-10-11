@@ -110,6 +110,14 @@ impl EntityId {
                  Self::DeclaredBot)
     }
 
+    /// Whether this entity is a human visitor (browser or ghost).
+    ///
+    /// Used by campfire modules to filter for visitor-facing analysis.
+    /// Fleet entities don't get archetypes — they get entity types.
+    pub fn is_human(&self) -> bool {
+        matches!(self, Self::HumanBrowser | Self::Ghost)
+    }
+
     /// Whether this entity is a ghost (residential proxy exit).
     pub fn is_ghost(&self) -> bool {
         matches!(self, Self::Ghost)

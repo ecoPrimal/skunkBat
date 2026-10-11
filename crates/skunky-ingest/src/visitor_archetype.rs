@@ -25,29 +25,10 @@
 //! See Paper 62 §2 (the Y intersection) for the theoretical framework.
 //! See `CAMPFIRE_MATURITY_CHAIN.md` for the migration plan from jellystein.
 
-use cellmembrane_types::campfire::VisitorArchetype;
+use cellmembrane_types::campfire::{ContentDomain, VisitorArchetype};
 
 use crate::entity_profile::EntityAccum;
-
-/// Surface sets for domain affinity detection.
-const IMMUNE_SURFACES: &[&str] = &[
-    "cytokine", "thymus", "complement", "lysozyme", "interferon",
-    "epitope", "antigen", "receptor", "opsonize", "antibody",
-    "macrophage", "bloom", "monitor",
-];
-
-const EVIDENCE_SURFACES: &[&str] = &[
-    "detroit", "evidence", "cashforkids", "clutch", "tuebor",
-];
-
-const SCIENCE_SURFACES: &[&str] = &["sporeprint"];
-
-/// Endpoints that indicate polling behavior (not exploration).
-const POLL_ENDPOINTS: &[&str] = &[
-    "dashboard.json", "billboard", "topology.json",
-    "epitope-history.json", "visitor-stories.json",
-    "page-stories.json", "campfire.json",
-];
+use crate::surface_registry;
 
 /// Classify a human visitor's behavioral archetype from their accumulated data.
 ///
@@ -74,36 +55,17 @@ pub fn classify_archetype(accum: &EntityAccum) -> Option<VisitorArchetype> {
         return None;
     }
 
-    // Extract surface names from hosts (strip ".primals.eco" suffix)
-    let surfaces: Vec<&str> = accum.hosts.keys()
-        .map(|h| h.strip_suffix(".primals.eco").unwrap_or(h.as_str()))
-        .collect();
+    let surfaces = accum.surface_keys();
     let n_surfaces = surfaces.len();
 
-    // Compute domain affinity counts
-    let immune_count = surfaces.iter()
-        .filter(|s| IMMUNE_SURFACES.contains(s))
-        .count();
-    let evidence_count = surfaces.iter()
-        .filter(|s| EVIDENCE_SURFACES.contains(s))
-        .count();
-    let science_count = surfaces.iter()
-        .filter(|s| SCIENCE_SURFACES.contains(s))
-        .count();
+    // Domain affinity from the registry
+    let immune_count = surface_registry::domain_count(&surfaces, ContentDomain::Immune);
+    let evidence_count = surface_registry::domain_count(&surfaces, ContentDomain::Evidence);
+    let science_count = surface_registry::domain_count(&surfaces, ContentDomain::Science);
 
-    // Duration in minutes
-    let dur_min = if accum.last_ts > accum.first_ts {
-        (accum.last_ts - accum.first_ts) / 60.0
-    } else {
-        0.0
-    };
+    let dur_min = accum.duration_min();
 
-    // Estimate poll ratio from hosts — polling endpoints hit specific surfaces
-    // We use the hud/signal surface affinity as a proxy for polling
-    let hud_hits = accum.hosts.get("hud.primals.eco")
-        .or_else(|| accum.hosts.get("signal.primals.eco"))
-        .copied()
-        .unwrap_or(0);
+    let hud_hits = accum.hud_polls();
     let total_hits = accum.total;
     let poll_ratio = if total_hits > 0 {
         hud_hits as f64 / total_hits as f64
@@ -268,7 +230,6 @@ pub fn narrate(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::collections::{HashMap, HashSet};
 
     fn make_accum(hosts: &[(&str, u64)], total: u64, dur_secs: f64) -> EntityAccum {
         let mut accum = EntityAccum::new();

@@ -22,14 +22,15 @@
 //! | **Total**                 | **807** | **campfire_writer.rs** (coordinator) |
 
 use std::collections::BTreeMap;
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 
 use cellmembrane_types::campfire::VisitorArchetype;
 use serde::Serialize;
 
+use crate::campfire_util;
 use crate::entity_classifier::EntityId;
 use crate::entity_profile::EntityAccum;
-use crate::mirror_inbox::{MirrorInbox, chrono_now_utc_pub};
+use crate::mirror_inbox::MirrorInbox;
 use crate::page_mirror::build_surface_mirrors;
 use crate::storyteller::{build_campfire, write_campfire};
 use crate::visitor_archetype::classify_archetype;
@@ -111,9 +112,8 @@ pub fn write_all(
 ) -> std::io::Result<()> {
     let mirror_inbox = MirrorInbox::new(&config.mirror_messages_path);
 
-    // Filter to human entities for visitor stories
     let human_entities: Vec<_> = entities.iter()
-        .filter(|(id, _)| matches!(id, EntityId::HumanBrowser | EntityId::Ghost))
+        .filter(|(id, _)| id.is_human())
         .collect();
 
     // 1. Write visitor-stories.json
@@ -148,23 +148,11 @@ fn write_visitor_stories(
 
     for (_, accum) in human_entities {
         if let Some(archetype) = classify_archetype(accum) {
-            let surfaces: Vec<String> = accum.hosts.keys()
-                .map(|h| h.strip_suffix(".primals.eco").unwrap_or(h).to_string())
-                .collect();
+            let surfaces = accum.surface_keys();
             let n_pages: u64 = accum.hosts.values().sum();
-            let dur_min = if accum.last_ts > accum.first_ts {
-                (accum.last_ts - accum.first_ts) / 60.0
-            } else {
-                0.0
-            };
-            let hud_polls = accum.hosts.get("hud.primals.eco")
-                .copied().unwrap_or(0);
-
-            let platform = if accum.ua_os.keys().any(|k| k.contains("Windows")) { "Win" }
-                else if accum.ua_os.keys().any(|k| k.contains("Macintosh")) { "Mac" }
-                else if accum.ua_os.keys().any(|k| k.contains("iPhone")) { "iPhone" }
-                else if accum.ua_os.keys().any(|k| k.contains("Linux")) { "Linux" }
-                else { "?" };
+            let dur_min = accum.duration_min();
+            let hud_polls = accum.hud_polls();
+            let platform = accum.platform();
 
             let sample = surfaces.iter()
                 .map(|s| format!("{s}/"))
@@ -187,15 +175,13 @@ fn write_visitor_stories(
     visitors.sort_by(|a, b| (b.pages + b.poll_count).cmp(&(a.pages + a.poll_count)));
 
     let output = VisitorStoriesOutput {
-        generated: chrono_now_utc_pub(),
+        generated: campfire_util::utc_now(),
         total_visitors: visitors.len(),
         archetypes: archetype_descs,
         visitors,
     };
 
-    let json = serde_json::to_string_pretty(&output)
-        .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e))?;
-    std::fs::write(config.output_dir.join("visitor-stories.json"), json)
+    campfire_util::write_json(&output, &config.output_dir.join("visitor-stories.json"))
 }
 
 fn write_page_stories(
@@ -223,16 +209,14 @@ fn write_page_stories(
         .collect();
 
     let output = PageStoriesOutput {
-        generated: chrono_now_utc_pub(),
+        generated: campfire_util::utc_now(),
         principle: "The value of knowledge is a matter of perspective.",
         total_pages_touched: total_pages,
         total_surfaces_touched: surfaces.len(),
         surfaces,
     };
 
-    let json = serde_json::to_string_pretty(&output)
-        .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e))?;
-    std::fs::write(config.output_dir.join("page-stories.json"), json)
+    campfire_util::write_json(&output, &config.output_dir.join("page-stories.json"))
 }
 
 #[cfg(test)]

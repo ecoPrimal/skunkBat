@@ -20,9 +20,10 @@
 use std::path::Path;
 
 use cellmembrane_types::campfire::{
-    CampfireStory, StoryKind, StoryTeller, SurfaceMirror, VisitorArchetype,
+    CampfireStory, StoryKind, StoryTeller,
 };
 
+use crate::campfire_util;
 use crate::entity_classifier::EntityId;
 use crate::entity_profile::EntityAccum;
 use crate::mirror_inbox::MirrorInbox;
@@ -58,9 +59,8 @@ pub fn build_campfire(
 ) -> Campfire {
     let mut stories = Vec::new();
 
-    // Count total human visitors
     let human_entities: Vec<_> = entities.iter()
-        .filter(|(id, _)| matches!(id, EntityId::HumanBrowser | EntityId::Ghost))
+        .filter(|(id, _)| id.is_human())
         .collect();
 
     let total_visitors = human_entities.len();
@@ -97,28 +97,21 @@ pub fn build_campfire(
     }
 
     // Individual visitor stories — archetype vignettes
-    for (entity_id, accum) in &human_entities {
+    for (_entity_id, accum) in &human_entities {
         if let Some(archetype) = classify_archetype(accum) {
-            let surfaces: Vec<&str> = accum.hosts.keys()
-                .map(|h| h.strip_suffix(".primals.eco").unwrap_or(h.as_str()))
-                .collect();
+            let surfaces = accum.surface_keys();
             let n_surfaces = surfaces.len();
             let n_pages = accum.hosts.values().sum::<u64>();
-            let dur_min = if accum.last_ts > accum.first_ts {
-                (accum.last_ts - accum.first_ts) / 60.0
-            } else {
-                0.0
-            };
-            let hud_polls = accum.hosts.get("hud.primals.eco")
-                .copied().unwrap_or(0);
+            let dur_min = accum.duration_min();
+            let hud_polls = accum.hud_polls();
 
-            let platform = detect_platform(accum);
+            let platform = accum.platform();
             let sample_pages: Vec<String> = surfaces.iter()
                 .map(|s| format!("{s}/"))
                 .collect();
 
             let vignette = narrate(
-                archetype, &platform, n_surfaces, n_pages, hud_polls, dur_min, &sample_pages
+                archetype, platform, n_surfaces, n_pages, hud_polls, dur_min, &sample_pages
             );
 
             stories.push(CampfireStory {
@@ -181,7 +174,7 @@ pub fn build_campfire(
     let visitor_count = stories.iter().filter(|s| s.teller == StoryTeller::Visitor).count();
 
     Campfire {
-        generated: crate::mirror_inbox::chrono_now_utc_pub(),
+        generated: campfire_util::utc_now(),
         fire: "the storytelling IS the epitope sort",
         total_stories: stories.len(),
         membrane_stories: membrane_count,
@@ -190,35 +183,18 @@ pub fn build_campfire(
     }
 }
 
-/// Detect platform from EntityAccum UA data.
-fn detect_platform(accum: &EntityAccum) -> String {
-    // Use the most common UA OS
-    if let Some((os, _)) = accum.ua_os.iter().max_by_key(|(_, c)| *c) {
-        if os.contains("Windows") || os.contains("Win") { return "Win".to_string(); }
-        if os.contains("Macintosh") || os.contains("Mac") { return "Mac".to_string(); }
-        if os.contains("iPhone") { return "iPhone".to_string(); }
-        if os.contains("Android") { return "Android".to_string(); }
-        if os.contains("Linux") { return "Linux".to_string(); }
-    }
-    "?".to_string()
-}
-
 /// Write campfire.json to disk.
 ///
 /// # Errors
 ///
 /// Returns an error if the file cannot be written.
 pub fn write_campfire(campfire: &Campfire, path: &Path) -> std::io::Result<()> {
-    let json = serde_json::to_string_pretty(campfire)
-        .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e))?;
-    std::fs::write(path, json)
+    campfire_util::write_json(campfire, path)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::collections::HashMap;
-
     #[test]
     fn empty_campfire() {
         let inbox = MirrorInbox::new("/tmp/test_empty_campfire.jsonl");
@@ -265,15 +241,15 @@ mod tests {
     }
 
     #[test]
-    fn detect_platform_windows() {
+    fn accum_platform_windows() {
         let mut accum = EntityAccum::new();
         accum.ua_os.insert("Windows NT 10.0".into(), 50);
-        assert_eq!(detect_platform(&accum), "Win");
+        assert_eq!(accum.platform(), "Win");
     }
 
     #[test]
-    fn detect_platform_empty() {
+    fn accum_platform_empty() {
         let accum = EntityAccum::new();
-        assert_eq!(detect_platform(&accum), "?");
+        assert_eq!(accum.platform(), "?");
     }
 }

@@ -302,6 +302,44 @@ pub(crate) struct EntityAccum {
 }
 
 impl EntityAccum {
+    /// Duration of the visit in minutes.
+    ///
+    /// Returns 0.0 if timestamps are invalid (first >= last).
+    pub(crate) fn duration_min(&self) -> f64 {
+        if self.last_ts > self.first_ts {
+            (self.last_ts - self.first_ts) / 60.0
+        } else {
+            0.0
+        }
+    }
+
+    /// Detect the visitor's platform from the most common UA OS entry.
+    pub(crate) fn platform(&self) -> &'static str {
+        if let Some((os, _)) = self.ua_os.iter().max_by_key(|(_, c)| *c) {
+            if os.contains("Windows") || os.contains("Win") { return "Win"; }
+            if os.contains("Macintosh") || os.contains("Mac") { return "Mac"; }
+            if os.contains("iPhone") { return "iPhone"; }
+            if os.contains("Android") { return "Android"; }
+            if os.contains("Linux") { return "Linux"; }
+        }
+        "?"
+    }
+
+    /// Number of hits to the HUD polling surface.
+    pub(crate) fn hud_polls(&self) -> u64 {
+        self.hosts.get("hud.primals.eco")
+            .or_else(|| self.hosts.get("signal.primals.eco"))
+            .copied()
+            .unwrap_or(0)
+    }
+
+    /// Surface keys with `.primals.eco` suffix stripped.
+    pub(crate) fn surface_keys(&self) -> Vec<&str> {
+        self.hosts.keys()
+            .map(|h| crate::surface_registry::strip_host(h.as_str()))
+            .collect()
+    }
+
     pub(crate) fn new() -> Self {
         Self {
             ip_hashes: HashSet::new(),

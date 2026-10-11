@@ -149,53 +149,14 @@ impl std::fmt::Display for MirrorError {
     }
 }
 
-/// Public accessor for the timestamp function.
-pub fn chrono_now_utc_pub() -> String {
-    chrono_now_utc()
-}
-
-/// Get current UTC timestamp as ISO 8601 string.
-/// Uses manual formatting to avoid chrono dependency.
+/// UTC timestamp — delegates to campfire_util.
 fn chrono_now_utc() -> String {
-    use std::time::{SystemTime, UNIX_EPOCH};
-    let since_epoch = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .unwrap_or_default();
-    let secs = since_epoch.as_secs();
-
-    // Convert epoch seconds to UTC datetime
-    let days = secs / 86400;
-    let time_secs = secs % 86400;
-    let hours = time_secs / 3600;
-    let minutes = (time_secs % 3600) / 60;
-    let seconds = time_secs % 60;
-
-    // Days since epoch to Y-M-D (simplified — good until 2100)
-    let mut y = 1970u64;
-    let mut remaining = days;
-    loop {
-        let days_in_year = if y % 4 == 0 && (y % 100 != 0 || y % 400 == 0) { 366 } else { 365 };
-        if remaining < days_in_year { break; }
-        remaining -= days_in_year;
-        y += 1;
-    }
-    let leap = y % 4 == 0 && (y % 100 != 0 || y % 400 == 0);
-    let month_days: [u64; 12] = [31, if leap { 29 } else { 28 }, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31];
-    let mut m = 0;
-    for (i, &md) in month_days.iter().enumerate() {
-        if remaining < md { m = i; break; }
-        remaining -= md;
-    }
-    let d = remaining + 1;
-
-    format!("{y:04}-{:02}-{d:02}T{hours:02}:{minutes:02}:{seconds:02}Z", m + 1)
+    crate::campfire_util::utc_now()
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::io::Write;
-
     fn temp_path() -> PathBuf {
         let mut path = std::env::temp_dir();
         path.push(format!("mirror_test_{}.jsonl", std::process::id()));
