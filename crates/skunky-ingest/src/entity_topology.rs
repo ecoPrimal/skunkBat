@@ -13,7 +13,12 @@ use std::path::{Path, PathBuf};
 
 use crate::caddy;
 use crate::entity_classifier::{EntityId, RequestFingerprint, classify, classify_with_registry};
-use crate::entity_profile::{EntityAccum, EntityProfile, EntityTopology, build_profile, build_comparative};
+use crate::entity_profile::{
+    EntityAccum, EntityProfile, EntityTopology, EpitopeSortSnapshot, build_profile, build_comparative,
+};
+
+/// Maximum number of epitope sort snapshots to keep in the rolling history.
+const MAX_HISTORY_SNAPSHOTS: usize = 200;
 
 /// Accumulator for building entity profiles from raw request fingerprints.
 pub struct TopologyBuilder {
@@ -273,6 +278,10 @@ pub struct TopologyWriter {
     culture_save_counter: u32,
     /// Shared epitope registry — culture-fed bot detection.
     registry: crate::epitope_registry::SharedRegistry,
+    /// Rolling history of epitope sort snapshots (WAS/IS time-series).
+    history: Vec<EpitopeSortSnapshot>,
+    /// Path to write the rolling epitope-history.json.
+    history_path: PathBuf,
 }
 
 impl TopologyWriter {
@@ -287,6 +296,18 @@ impl TopologyWriter {
         flush_interval: u64,
         registry: crate::epitope_registry::SharedRegistry,
     ) -> Self {
+        let history_path = output_path
+            .parent()
+            .unwrap_or_else(|| Path::new("."))
+            .join("epitope-history.json");
+
+        // Warm-start history from disk if it exists
+        let history = match std::fs::read_to_string(&history_path) {
+            Ok(json) => serde_json::from_str::<Vec<EpitopeSortSnapshot>>(&json)
+                .unwrap_or_default(),
+            Err(_) => Vec::new(),
+        };
+
         let builder = TopologyBuilder::load(&state_path);
         let state = Self {
             builder,
@@ -296,10 +317,14 @@ impl TopologyWriter {
             ingest_count: 0,
             culture_save_counter: 0,
             registry,
+            history,
+            history_path,
         };
         tracing::info!(
             output = %state.output_path.display(),
             culture = %state.state_path.display(),
+            history = %state.history_path.display(),
+            history_snapshots = state.history.len(),
             interval = state.flush_interval,
             "🗺️ topology writer loaded"
         );
@@ -373,11 +398,64 @@ impl TopologyWriter {
             }
         }
 
+        // ── Epitope sort history (Wave 171) ──
+        // Build a compact snapshot and append to the rolling buffer.
+        self.append_history_snapshot(&topology);
+
         // Save the sourdough culture every 10 topology flushes (~5000 entries).
         // Always save on explicit flush (shutdown path).
         self.culture_save_counter += 1;
         if self.culture_save_counter % 10 == 0 || self.culture_save_counter == 1 {
             self.save_culture();
+        }
+    }
+
+    /// Build and append an epitope sort snapshot to the rolling history buffer,
+    /// then write `epitope-history.json` to disk.
+    fn append_history_snapshot(&mut self, topology: &EntityTopology) {
+        let mut entries: Vec<_> = topology.entities
+            .iter()
+            .map(|p| p.sort_entry())
+            .collect();
+        // Sort by fleet_confidence ascending (most alive first)
+        entries.sort_by(|a, b| a.fc.partial_cmp(&b.fc).unwrap_or(std::cmp::Ordering::Equal));
+
+        let non_self_in_range = topology.entities
+            .iter()
+            .filter(|e| e.vitality > 0.1)
+            .count() as u16;
+
+        let snapshot = EpitopeSortSnapshot {
+            ts: topology.generated_epoch,
+            iso: topology.generated_iso.clone(),
+            total_requests: topology.log_entries_analyzed,
+            entity_count: topology.entities.len() as u16,
+            non_self_in_range,
+            entities: entries,
+        };
+
+        self.history.push(snapshot);
+
+        // Trim to rolling window
+        if self.history.len() > MAX_HISTORY_SNAPSHOTS {
+            let drain = self.history.len() - MAX_HISTORY_SNAPSHOTS;
+            self.history.drain(..drain);
+        }
+
+        // Write to disk
+        match serde_json::to_string(&self.history) {
+            Ok(json) => {
+                if let Err(e) = std::fs::write(&self.history_path, &json) {
+                    tracing::warn!(
+                        error = %e,
+                        path = %self.history_path.display(),
+                        "epitope-history.json write failed"
+                    );
+                }
+            }
+            Err(e) => {
+                tracing::warn!(error = %e, "epitope history serialization failed");
+            }
         }
     }
 

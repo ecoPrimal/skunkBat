@@ -816,6 +816,98 @@ pub struct EntityTopology {
     pub comparative_fingerprints: Vec<ComparativeRow>,
 }
 
+// ── Epitope sort history (Wave 171 — WAS/IS time-series) ──
+
+/// Compact per-entity state for history snapshots.
+///
+/// Designed for space-efficient JSONL — one snapshot per topology flush,
+/// rolling buffer of the last N snapshots written to `epitope-history.json`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct EntitySortEntry {
+    /// Entity identifier (e.g. "human_browser", "ghost").
+    pub entity: String,
+    /// Total accumulated requests.
+    pub reqs: u64,
+    /// Unique IP addresses observed.
+    pub ips: u32,
+    /// Fleet confidence (0.0–100.0).
+    pub fc: f32,
+    /// Vitality — entropy-gated life signal (0.0–1.0).
+    pub vit: f32,
+    /// Negentropy — defensive information score (0.0–100.0).
+    pub neg: f32,
+    /// 6-byte epitope sort key (Paper 48 information-content ordering).
+    pub sort_key: [u8; 6],
+    /// Compression score (0–21, sum of triggered epitope weights).
+    pub compression: u16,
+    /// Number of epitopes triggered.
+    pub triggered: u8,
+    /// Number of epitopes evaluated.
+    pub evaluated: u8,
+}
+
+/// One snapshot of the full epitope sort — the organism's view at a moment in time.
+///
+/// Appended to `epitope-history.json` as a rolling buffer. Each flush of
+/// `TopologyWriter` produces one snapshot. The organism accumulates WAS
+/// from a stream of IS snapshots.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct EpitopeSortSnapshot {
+    /// Unix epoch seconds.
+    pub ts: u64,
+    /// ISO 8601 timestamp.
+    pub iso: String,
+    /// Total requests across all entities.
+    pub total_requests: u64,
+    /// Number of classified entities.
+    pub entity_count: u16,
+    /// Count of entities with vitality > 0.1 — "self knows the count of non-self in range."
+    pub non_self_in_range: u16,
+    /// Compact per-entity state, sorted by fleet_confidence ascending.
+    pub entities: Vec<EntitySortEntry>,
+}
+
+impl EntityProfile {
+    /// Extract a compact sort entry for history snapshots.
+    pub fn sort_entry(&self) -> EntitySortEntry {
+        let sort_key = self.epitopes.epitope_sort_key();
+        let compression = self.epitopes.compression_score() as u16;
+
+        let mut triggered: u8 = 0;
+        let mut evaluated: u8 = 0;
+        let fields: [&Option<EpitopeResult>; 7] = [
+            &self.epitopes.burst_ratio,
+            &self.epitopes.reading_deficit,
+            &self.epitopes.ua_pool_poverty,
+            &self.epitopes.sec_fetch_monotone,
+            &self.epitopes.session_absent,
+            &self.epitopes.referer_self_loop,
+            &self.epitopes.referer_absence,
+        ];
+        for f in &fields {
+            if let Some(r) = f {
+                evaluated += 1;
+                if r.triggered {
+                    triggered += 1;
+                }
+            }
+        }
+
+        EntitySortEntry {
+            entity: format!("{:?}", self.entity).to_lowercase(),
+            reqs: self.total_requests,
+            ips: self.unique_ips as u32,
+            fc: self.fleet_confidence as f32,
+            vit: self.vitality as f32,
+            neg: self.negentropy as f32,
+            sort_key,
+            compression,
+            triggered,
+            evaluated,
+        }
+    }
+}
+
 /// One row in the comparative fingerprint table.
 #[derive(Debug, Serialize)]
 pub struct ComparativeRow {
@@ -977,5 +1069,38 @@ mod tests {
         assert_eq!(EPITOPE_SORT_ORDER[3], "sec_fetch_monotone");
         assert_eq!(EPITOPE_SORT_ORDER[4], "session_absent");
         assert_eq!(EPITOPE_SORT_ORDER[5], "referer_self_loop");
+    }
+
+    #[test]
+    fn epitope_sort_snapshot_serializes() {
+        let snap = EpitopeSortSnapshot {
+            ts: 1700000000,
+            iso: "2026-10-11T02:00:00Z".to_string(),
+            total_requests: 100_000,
+            entity_count: 3,
+            non_self_in_range: 2,
+            entities: vec![
+                EntitySortEntry {
+                    entity: "human_browser".to_string(),
+                    reqs: 5000,
+                    ips: 200,
+                    fc: 30.0,
+                    vit: 0.3,
+                    neg: 0.0,
+                    sort_key: [2, 1, 0, 2, 0, 1],
+                    compression: 10,
+                    triggered: 3,
+                    evaluated: 5,
+                },
+            ],
+        };
+        let json = serde_json::to_string(&snap).unwrap();
+        assert!(json.contains("\"non_self_in_range\":2"));
+        assert!(json.contains("\"human_browser\""));
+
+        // Round-trip
+        let back: EpitopeSortSnapshot = serde_json::from_str(&json).unwrap();
+        assert_eq!(back.non_self_in_range, 2);
+        assert_eq!(back.entities[0].triggered, 3);
     }
 }
