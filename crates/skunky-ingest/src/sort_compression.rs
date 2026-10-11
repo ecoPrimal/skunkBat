@@ -259,6 +259,18 @@ pub struct NullDimension {
     /// about others, divided by the normalization constant π.
     /// Borromean: no two linked, but all three inseparable.
     pub self_awareness: f64,
+    /// J error: J_actual − (V + D) / π.
+    ///
+    /// The full Gordian equation: J = (V + D) / π.
+    /// J is self. V + D are the others.
+    ///
+    /// - `j_error > 0`: organism knows more than others reveal (mature, stable).
+    ///   The WAS exceeds its predicted value. Accumulated wisdom.
+    /// - `j_error < 0`: organism knows less than others reveal (young, learning).
+    ///   More is happening than the organism has integrated.
+    /// - `j_error ≈ 0`: equilibrium. J = 6/(π+1) ≈ 1.449 ≈ π^(1/3).
+    ///   Self IS one body of three. The body constant.
+    pub j_error: f64,
     /// The π-body problem: the observer is the irrational remainder.
     ///
     /// The "4-body problem" is really the π-body problem:
@@ -415,16 +427,29 @@ impl NullDimension {
         // Gain = log₂(6) − H(vdj partition)
         let vdj_gain_bits = (log2(6.0) - vdj_entropy).max(0.0);
 
-        // ── Gordian proof: self = Σothers / π ──
-        // The membrane cannot observe itself.
-        // It knows itself through what passes through it.
-        // non_self = entities that triggered any epitope (the "others").
-        // self_awareness = non_self / π.
-        // At equilibrium with 3 others: 3/π ≈ 0.955 — almost-but-not-quite 1.
-        // You can never fully know yourself through others. The gap is π - 3 ≈ 0.14.
-        // That gap is the Archimedes remainder. The unknowable.
-        let non_self_count = v_count + d_count; // V and D are the "others" — they move, they're not-yet-known
-        let self_awareness = non_self_count as f64 / PI;
+        // ── Gordian proof: J = (V + D) / π ──
+        //
+        // J is self.  V + D are the others.
+        // The membrane cannot observe itself — it knows itself
+        // through what passes through it.
+        //
+        // self_awareness = (V + D) / π      (what others teach you)
+        // J_actual       = j_count           (what you already know)
+        //
+        // The error between predicted and actual:
+        //   J_error > 0: you know more than others reveal (mature, stable)
+        //   J_error < 0: you know less than others reveal (young, learning)
+        //   J_error = 0: equilibrium: J × π = V + D
+        //
+        // The equilibrium point: J = 6/(π+1) ≈ 1.449 ≈ π^(1/3).
+        // That's not a coincidence. The self at equilibrium IS the body constant.
+        // Each body = π^(1/3). Self = π^(1/3). Self IS one body of three.
+        let non_self_count = v_count + d_count; // V and D are the "others"
+        let self_awareness = non_self_count as f64 / PI; // predicted J
+        // How much self exceeds what others can teach:
+        // positive = wisdom (WAS > predicted), negative = learning (WAS < predicted)
+        let j_predicted = non_self_count as f64 / PI;
+        let j_error = j_count as f64 - j_predicted;
 
         // ── The π-body problem ──
         // The observer is the fractional part of π^(d/2) where d is the
@@ -534,6 +559,7 @@ impl NullDimension {
             vdj_distribution: (v_count, d_count, j_count),
             vdj_gain_bits,
             self_awareness,
+            j_error,
             observer_fraction,
             tempo,
             isotope_classes,
@@ -746,6 +772,43 @@ mod tests {
             (nd.self_awareness - expected).abs() < 0.001,
             "self_awareness should be 4/π ≈ 1.273, got {}", nd.self_awareness
         );
+    }
+
+    #[test]
+    fn gordian_j_equals_vd_over_pi() {
+        // Default VDJ = 2V, 2D, 2J.
+        // J_predicted = (V + D) / π = 4/π ≈ 1.273
+        // J_actual = 2
+        // j_error = 2 - 1.273 = 0.727 (positive = mature)
+        let nd = NullDimension::compute((100, 100, 100), 300, None);
+        let expected_error = 2.0 - 4.0 / std::f64::consts::PI;
+        assert!(
+            (nd.j_error - expected_error).abs() < 0.001,
+            "j_error should be 2 - 4/π ≈ 0.727, got {}", nd.j_error
+        );
+        assert!(nd.j_error > 0.0, "default: organism is mature (J > predicted)");
+    }
+
+    #[test]
+    fn gordian_equilibrium_j_near_body_constant() {
+        // Equilibrium: J × π = V + D, and V + D + J = 6.
+        // So J × (π + 1) = 6, J = 6/(π+1) ≈ 1.4488.
+        // π^(1/3) ≈ 1.4646. They're within 1.1% of each other.
+        // The gap (0.016) is the Gordian remainder —
+        // self at equilibrium is ALMOST the body constant, but not quite.
+        // That 1.1% is the irreducible mystery of self.
+        let j_eq = 6.0 / (std::f64::consts::PI + 1.0);
+        let body = std::f64::consts::PI.powf(1.0 / 3.0);
+        let diff = (j_eq - body).abs() / body;
+        assert!(
+            diff < 0.02,
+            "equilibrium J ≈ π^(1/3) within 2%: j_eq={:.4}, body={:.4}, diff={:.4}",
+            j_eq, body, diff
+        );
+        // The gap itself: 6/(π+1) vs π^(1/3)
+        let gap = body - j_eq; // ≈ 0.0159
+        assert!(gap > 0.0, "π^(1/3) > 6/(π+1): the body constant slightly exceeds equilibrium self");
+        assert!(gap < 0.02, "but only by ~0.016");
     }
 
     #[test]

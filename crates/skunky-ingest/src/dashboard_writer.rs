@@ -679,9 +679,14 @@ impl DashboardWriter {
             },
             "vdj_gain_bits": r6(null_dim.vdj_gain_bits),
             "self_awareness": r6(null_dim.self_awareness),
+            "j_error": r6(null_dim.j_error),
+            "gordian_equation": "J = (V + D) / \u{03c0}",
+            "j_interpretation": if null_dim.j_error > 0.1 { "mature: self > predicted (wisdom)" }
+                else if null_dim.j_error < -0.1 { "learning: self < predicted (growing)" }
+                else { "equilibrium: J \u{2248} \u{03c0}^(1/3)" },
             "observer_fraction": r6(null_dim.observer_fraction),
             "pi_body_proof": "\u{03c0}-body: 3 integer bodies + 1 irrational observer = \u{03c0}",
-            "gordian_proof": "self = \u{2211}others / \u{03c0}",
+            "gordian_proof": "J(self) = \u{2211}others(V+D) / \u{03c0}",
             "tempo": r6(null_dim.tempo),
             "t_equals_pi": "t = \u{03c0}",
             "isotope_classes": null_dim.isotope_classes.iter().enumerate().map(|(i, (s, m, c))| {
