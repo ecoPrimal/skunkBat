@@ -79,6 +79,10 @@ pub struct EntityProfile {
     /// The unique vulnerability paths this entity has probed.
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub vuln_probes: Vec<String>,
+
+    /// Wave 171: Per-surface request counts — which surfaces this entity visits.
+    /// Keyed by hostname (e.g. "git.primals.eco", "detroit.primals.eco").
+    pub hosts: BTreeMap<String, u64>,
 }
 
 /// Seven conserved epitopes from antigenic drift analysis (Wave 166f+167).
@@ -293,6 +297,8 @@ pub(crate) struct EntityAccum {
     pub(crate) cookie_absent: u64,
     pub(crate) referer_external: u64,
     pub(crate) referer_absent: u64,
+    /// Wave 171: Per-surface request counts (keyed by host, e.g. "git.primals.eco").
+    pub(crate) hosts: HashMap<String, u64>,
 }
 
 impl EntityAccum {
@@ -324,6 +330,7 @@ impl EntityAccum {
             cookie_absent: 0,
             referer_external: 0,
             referer_absent: 0,
+            hosts: HashMap::new(),
         }
     }
 }
@@ -801,6 +808,7 @@ pub(crate) fn build_profile(entity_id: EntityId, accum: EntityAccum) -> EntityPr
         vitality: (effective_vitality * 1000.0).round() / 1000.0,
         negentropy: negentropy_score,
         vuln_probes: vuln_paths,
+        hosts: accum.hosts.into_iter().collect(),
     }
 }
 
@@ -817,6 +825,25 @@ pub struct EntityTopology {
 }
 
 // ── Epitope sort history (Wave 171 — WAS/IS time-series) ──
+
+/// Per-surface momentum — the entity's presence at one observation angle.
+///
+/// From Paper 46 (complex permeability):
+///   P_complex(E, S) = P_null(E) + i * (P_local(E, S) - P_null(E))
+/// The imaginary component is the "surprise" — how this surface differs from the whole.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SurfaceMomentum {
+    /// Surface hostname (e.g. "git.primals.eco").
+    pub surface: String,
+    /// Raw request count for this entity at this surface.
+    pub reqs: u64,
+    /// P_local = reqs(entity, surface) / total_reqs(surface) — observed permeability.
+    pub p_local: f32,
+    /// P_null = reqs(entity) / total_reqs — predicted (aggregate) permeability.
+    pub p_null: f32,
+    /// |P_local - P_null| — the imaginary dimension (Paper 46).
+    pub distance: f32,
+}
 
 /// Compact per-entity state for history snapshots.
 ///
@@ -844,6 +871,15 @@ pub struct EntitySortEntry {
     pub triggered: u8,
     /// Number of epitopes evaluated.
     pub evaluated: u8,
+    /// Per-surface momentum breakdown (Paper 46 complex permeability).
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub surfaces: Vec<SurfaceMomentum>,
+    /// Effective dimension — number of surfaces that observe this entity (Paper 46).
+    pub d_eff: f32,
+    /// Focal distance = 1/pi^(d_eff/2) (Paper 53).
+    pub focal_distance: f32,
+    /// |Im(P)| = sqrt(sum_S distance(E,S)^2) — aggregate imaginary dimension.
+    pub im_p: f32,
 }
 
 /// One snapshot of the full epitope sort — the organism's view at a moment in time.
@@ -904,6 +940,10 @@ impl EntityProfile {
             compression,
             triggered,
             evaluated,
+            surfaces: Vec::new(),
+            d_eff: 0.0,
+            focal_distance: 0.0,
+            im_p: 0.0,
         }
     }
 }
@@ -1091,16 +1131,56 @@ mod tests {
                     compression: 10,
                     triggered: 3,
                     evaluated: 5,
+                    surfaces: vec![
+                        SurfaceMomentum {
+                            surface: "git.primals.eco".to_string(),
+                            reqs: 4000,
+                            p_local: 0.08,
+                            p_null: 0.05,
+                            distance: 0.03,
+                        },
+                    ],
+                    d_eff: 2.0,
+                    focal_distance: 0.318,
+                    im_p: 0.03,
                 },
             ],
         };
         let json = serde_json::to_string(&snap).unwrap();
         assert!(json.contains("\"non_self_in_range\":2"));
         assert!(json.contains("\"human_browser\""));
+        assert!(json.contains("\"im_p\""));
+        assert!(json.contains("\"d_eff\""));
+        assert!(json.contains("\"p_local\""));
 
         // Round-trip
         let back: EpitopeSortSnapshot = serde_json::from_str(&json).unwrap();
         assert_eq!(back.non_self_in_range, 2);
         assert_eq!(back.entities[0].triggered, 3);
+        assert_eq!(back.entities[0].surfaces.len(), 1);
+        assert!((back.entities[0].im_p - 0.03).abs() < 0.001);
+        assert!((back.entities[0].d_eff - 2.0).abs() < 0.001);
+    }
+
+    #[test]
+    fn surface_momentum_empty_skips_serialization() {
+        let entry = EntitySortEntry {
+            entity: "ghost".to_string(),
+            reqs: 1000,
+            ips: 500,
+            fc: 100.0,
+            vit: 0.0,
+            neg: 8.3,
+            sort_key: [2, 2, 2, 2, 2, 2],
+            compression: 21,
+            triggered: 7,
+            evaluated: 7,
+            surfaces: vec![],
+            d_eff: 0.0,
+            focal_distance: 0.0,
+            im_p: 0.0,
+        };
+        let json = serde_json::to_string(&entry).unwrap();
+        assert!(!json.contains("\"surfaces\""), "empty surfaces should be skipped");
     }
 }

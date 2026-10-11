@@ -167,6 +167,11 @@ impl TopologyBuilder {
         } else if !fp.referer.contains(&fp.host) {
             accum.referer_external += 1;
         }
+
+        // Wave 171: Per-surface host tracking
+        if !fp.host.is_empty() {
+            *accum.hosts.entry(fp.host.clone()).or_insert(0) += 1;
+        }
     }
 
     /// Build the final topology — sorted by request count descending.
@@ -412,11 +417,78 @@ impl TopologyWriter {
 
     /// Build and append an epitope sort snapshot to the rolling history buffer,
     /// then write `epitope-history.json` to disk.
+    ///
+    /// Computes per-surface momentum using Paper 46 complex permeability:
+    ///   P_local(E, S) = reqs(E,S) / total_reqs(S)
+    ///   P_null(E) = reqs(E) / total_reqs
+    ///   distance(E, S) = |P_local - P_null|
+    ///   |Im(P)|(E) = sqrt(sum_S distance^2)
+    ///   d_eff(E) = count of surfaces where reqs > 0
+    ///   focal_distance(E) = 1/pi^(d_eff/2) (Paper 53)
     fn append_history_snapshot(&mut self, topology: &EntityTopology) {
+        use crate::entity_profile::SurfaceMomentum;
+
+        let total_reqs = topology.log_entries_analyzed as f64;
+
+        // Phase 1: Collect per-surface totals across ALL entities.
+        let mut surface_totals: HashMap<String, u64> = HashMap::new();
+        for profile in &topology.entities {
+            for (host, count) in &profile.hosts {
+                *surface_totals.entry(host.clone()).or_insert(0) += count;
+            }
+        }
+
+        // Phase 2: Build entries with per-surface momentum.
         let mut entries: Vec<_> = topology.entities
             .iter()
-            .map(|p| p.sort_entry())
+            .map(|p| {
+                let mut entry = p.sort_entry();
+                let p_null = if total_reqs > 0.0 {
+                    p.total_requests as f32 / total_reqs as f32
+                } else {
+                    0.0
+                };
+
+                let mut surfaces = Vec::new();
+                let mut im_p_sum = 0.0f64;
+                let mut d_eff_count = 0u32;
+
+                for (host, &reqs) in &p.hosts {
+                    if reqs == 0 { continue; }
+                    d_eff_count += 1;
+                    let surface_total = *surface_totals.get(host).unwrap_or(&1);
+                    let p_local = reqs as f32 / surface_total as f32;
+                    let distance = (p_local - p_null).abs();
+                    im_p_sum += (distance as f64) * (distance as f64);
+
+                    surfaces.push(SurfaceMomentum {
+                        surface: host.clone(),
+                        reqs,
+                        p_local,
+                        p_null,
+                        distance,
+                    });
+                }
+
+                // Sort surfaces by request count descending
+                surfaces.sort_by(|a, b| b.reqs.cmp(&a.reqs));
+
+                let d_eff = d_eff_count as f32;
+                let focal_distance = if d_eff > 0.0 {
+                    1.0 / std::f32::consts::PI.powf(d_eff / 2.0)
+                } else {
+                    0.0
+                };
+                let im_p = im_p_sum.sqrt() as f32;
+
+                entry.surfaces = surfaces;
+                entry.d_eff = d_eff;
+                entry.focal_distance = focal_distance;
+                entry.im_p = im_p;
+                entry
+            })
             .collect();
+
         // Sort by fleet_confidence ascending (most alive first)
         entries.sort_by(|a, b| a.fc.partial_cmp(&b.fc).unwrap_or(std::cmp::Ordering::Equal));
 
