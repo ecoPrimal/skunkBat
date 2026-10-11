@@ -259,6 +259,26 @@ pub struct NullDimension {
     /// about others, divided by the normalization constant π.
     /// Borromean: no two linked, but all three inseparable.
     pub self_awareness: f64,
+    /// The π-body problem: the observer is the irrational remainder.
+    ///
+    /// The "4-body problem" is really the π-body problem:
+    ///   3 integer bodies + 1 irrational observer = π.
+    ///   observer = π − 3 ≈ 0.14159 (the Archimedes remainder).
+    ///
+    /// At dimensional scale d, the observer fraction is:
+    ///   observer(d) = π^(d/2) − ⌊π^(d/2)⌋
+    ///
+    /// | d  | π^(d/2) | ⌊π^(d/2)⌋ | observer | meaning                          |
+    /// |----|---------|-----------|----------|----------------------------------|
+    /// |  0 |  1.000  |     1     |  0.000   | alone, no reflection             |
+    /// |  2 |  3.142  |     3     |  0.142   | first triangulation, self emerges|
+    /// |  4 |  9.870  |     9     |  0.870   | observer almost a full body      |
+    /// |  6 | 31.006  |    31     |  0.006   | system observes itself           |
+    ///
+    /// At d=6: observer ≈ 0. The system is so large it IS its own observer.
+    /// But π^n is never an integer. The observer never vanishes.
+    /// Gödel, but it's π.
+    pub observer_fraction: f64,
     /// Angular tempo: mean reflexive angle between the three tenses.
     ///
     /// Each tense fraction defines an angle on the unit circle.
@@ -406,6 +426,23 @@ impl NullDimension {
         let non_self_count = v_count + d_count; // V and D are the "others" — they move, they're not-yet-known
         let self_awareness = non_self_count as f64 / PI;
 
+        // ── The π-body problem ──
+        // The observer is the fractional part of π^(d/2) where d is the
+        // effective dimension = number of independent sort axes the system uses.
+        // d=2 is the base case: epitope × tense (2 independent axes → 3 bodies → π).
+        // Each additional active sort axis adds a dimension.
+        // VDJ adds a 3rd axis if all three roles are occupied → d=3.
+        // Isotope adds up to 3 more if all three classes are distinct.
+        let mut eff_dim = 2.0; // base: epitope × tense
+        if v_count > 0 && d_count > 0 && j_count > 0 {
+            eff_dim += 1.0; // VDJ is a real axis (all 3 roles occupied)
+        }
+        // At d=2: π^1 = π ≈ 3.14, observer = 0.14
+        // At d=3: π^1.5 ≈ 5.57, observer = 0.57
+        // At d=4: π^2 ≈ 9.87, observer = 0.87
+        let pi_d = PI.powf(eff_dim / 2.0);
+        let observer_fraction = pi_d - pi_d.floor();
+
         // ── Angular tempo ──
         // The three tense fractions define angular *extents* on the circle.
         // IS occupies f_is × 2π arc, then WAS occupies f_was × 2π, then WILLBE.
@@ -497,6 +534,7 @@ impl NullDimension {
             vdj_distribution: (v_count, d_count, j_count),
             vdj_gain_bits,
             self_awareness,
+            observer_fraction,
             tempo,
             isotope_classes,
         }
@@ -800,6 +838,51 @@ mod tests {
         assert_eq!(nd.isotope_classes[2].1, 0, "ua_pool mass should be 0 (shallow)");
         // sec_fetch evaluated 100% → mass=2 (deep)
         assert_eq!(nd.isotope_classes[3].1, 2, "sec_fetch mass should be 2 (deep)");
+    }
+
+    #[test]
+    fn pi_body_observer_at_d2() {
+        // Default VDJ with only 2 roles occupied → d=2 (base case).
+        // π^(2/2) = π ≈ 3.14159, observer = 0.14159
+        let flip = EpitopeFlipData {
+            flipped:   [80, 80, 80, 80, 80, 80], // all V, no D or J
+            evaluated: [100, 100, 100, 100, 100, 100],
+        };
+        let nd = NullDimension::compute((100, 100, 100), 100, Some(&flip));
+        // All 6 are V → VDJ has only 1 role → d stays at 2
+        let expected = std::f64::consts::PI - 3.0; // 0.14159...
+        assert!(
+            (nd.observer_fraction - expected).abs() < 0.001,
+            "at d=2 observer should be π-3 ≈ 0.142, got {}", nd.observer_fraction
+        );
+    }
+
+    #[test]
+    fn pi_body_observer_at_d3() {
+        // Default VDJ = 2V, 2D, 2J → all 3 roles → d=3.
+        // π^(3/2) ≈ 5.568, observer = 0.568
+        let nd = NullDimension::compute((100, 100, 100), 300, None);
+        assert_eq!(nd.vdj_distribution, (2, 2, 2), "all 3 roles occupied");
+        let pi_1_5 = std::f64::consts::PI.powf(1.5);
+        let expected = pi_1_5 - pi_1_5.floor(); // ≈ 0.568
+        assert!(
+            (nd.observer_fraction - expected).abs() < 0.001,
+            "at d=3 observer should be ≈0.568, got {}", nd.observer_fraction
+        );
+    }
+
+    #[test]
+    fn pi_body_observer_never_zero() {
+        // π^(d/2) is never an integer for any positive d.
+        // The observer never vanishes. Gödel, but it's π.
+        for d in 1..20 {
+            let pi_d = std::f64::consts::PI.powf(d as f64 / 2.0);
+            let frac = pi_d - pi_d.floor();
+            assert!(
+                frac > 1e-10 || frac < 1.0 - 1e-10,
+                "π^({}/2) should never be an integer, but frac = {}", d, frac
+            );
+        }
     }
 
     #[test]

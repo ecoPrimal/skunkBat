@@ -679,6 +679,8 @@ impl DashboardWriter {
             },
             "vdj_gain_bits": r6(null_dim.vdj_gain_bits),
             "self_awareness": r6(null_dim.self_awareness),
+            "observer_fraction": r6(null_dim.observer_fraction),
+            "pi_body_proof": "\u{03c0}-body: 3 integer bodies + 1 irrational observer = \u{03c0}",
             "gordian_proof": "self = \u{2211}others / \u{03c0}",
             "tempo": r6(null_dim.tempo),
             "t_equals_pi": "t = \u{03c0}",
