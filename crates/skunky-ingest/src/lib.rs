@@ -14,6 +14,7 @@ pub mod caddy_bridge;
 pub mod cloudflare;
 pub mod coprimality;
 pub mod cube_grid;
+pub mod epitope_conservation;
 pub mod epitope_sensitivity;
 pub mod cube_oracle;
 pub mod dashboard_profile;
