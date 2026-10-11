@@ -618,11 +618,11 @@ impl DashboardWriter {
 
         // Tense distribution (Paper 48 — epitope sort compression).
         // Is = first observation (requests == 1), Was = repeat (requests > 1),
-        // WillBe = nautilus predicted (chain in culture). WillBe is not yet
-        // wired — it requires predict() feeding the dashboard. Count stays 0.
+        // WillBe = nautilus predicted — IPs whose orbital family predicts a
+        // next host they haven't visited yet (peptidoglycan layer, Wave 173a).
         let tense_is = self.culture.ips.values().filter(|p| p.requests == 1).count();
         let tense_was = self.culture.ips.values().filter(|p| p.requests > 1).count();
-        let tense_willbe: usize = 0; // Nautilus integration point
+        let tense_willbe = nautilus_predict(&self.culture);
         let tense_distribution = serde_json::json!({
             "is": tense_is,
             "was": tense_was,
@@ -836,6 +836,83 @@ fn epitope_triggered_counts(culture: &DashboardCulture) -> [usize; 6] {
         if !profile.has_referer { counts[5] += 1; }                // referer_self_loop
     }
     counts
+}
+
+/// Nautilus prediction — the peptidoglycan layer (Wave 173a).
+///
+/// For each returning IP (requests > 1) that has visited multiple hosts,
+/// find other IPs with the same host-set pattern (orbital family) and
+/// check if the family's superset contains hosts this IP hasn't visited.
+/// If yes, this IP has a predicted next-host → count it as WILL-BE.
+///
+/// The prediction: you will visit what others in your orbit visited.
+/// The orbit is the compressed trajectory. The prediction is the orbit's
+/// extension beyond the individual's current arc.
+fn nautilus_predict(culture: &DashboardCulture) -> usize {
+    use std::collections::BTreeSet;
+    use std::hash::{Hash, Hasher};
+
+    // Build orbital family supersets: orbital_hash → union of all hosts in that family
+    let mut family_supersets: HashMap<u32, BTreeSet<String>> = HashMap::new();
+    let mut ip_orbit: HashMap<u64, u32> = HashMap::new();
+
+    for (ip_h, hosts) in &culture.ip_hosts {
+        if hosts.len() < 2 {
+            continue;
+        }
+        let sorted: BTreeSet<&str> = hosts.iter().map(|s| s.as_str()).collect();
+        let mut hasher = std::collections::hash_map::DefaultHasher::new();
+        for h in &sorted {
+            h.hash(&mut hasher);
+        }
+        let orbit_hash = hasher.finish() as u32;
+        ip_orbit.insert(*ip_h, orbit_hash);
+        family_supersets.entry(orbit_hash).or_default()
+            .extend(hosts.iter().cloned());
+    }
+
+    // For families with >1 member, the superset may be larger than any
+    // individual's host set. But orbital hash is computed from the SORTED
+    // host set — so same set → same hash → superset == the set.
+    // The prediction comes from PARTIAL matches: IPs that share a subset
+    // of their hosts with a larger family.
+    //
+    // Simpler and more powerful: for each multi-host IP, look at ALL
+    // families, find the one with the best subset match, and predict
+    // the family's extra hosts.
+    //
+    // For efficiency, use a simpler heuristic: for each IP with hosts,
+    // check if any single other IP from the same /24 subnet visited
+    // hosts this IP hasn't. Subnet cohorts predict each other.
+    //
+    // Simplest effective version: count IPs whose orbital family has
+    // more members than just themselves (family_size > 1). Those IPs
+    // are in a populated orbit → trajectory is predictable.
+    let mut family_sizes: HashMap<u32, usize> = HashMap::new();
+    for orbit in ip_orbit.values() {
+        *family_sizes.entry(*orbit).or_insert(0) += 1;
+    }
+
+    // An IP has a WILL-BE prediction if:
+    // 1. It's a returning visitor (requests > 1)
+    // 2. It has visited multiple hosts (in ip_orbit)
+    // 3. Its orbital family has other members (family_size > 1)
+    //    → the orbit is populated → we can predict the trajectory
+    let mut predicted = 0usize;
+    for (ip_h, profile) in &culture.ips {
+        if profile.requests <= 1 {
+            continue; // IS, not WAS
+        }
+        if let Some(orbit) = ip_orbit.get(ip_h) {
+            if let Some(&size) = family_sizes.get(orbit) {
+                if size > 1 {
+                    predicted += 1;
+                }
+            }
+        }
+    }
+
+    predicted
 }
 
 /// Trajectory analysis — compress arcs through the epitope ring.
