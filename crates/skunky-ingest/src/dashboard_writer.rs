@@ -682,6 +682,7 @@ impl DashboardWriter {
             "sort_compression": sort_compression,
             "trajectory": trajectory_analysis(&self.culture),
             "membrane_geometry": membrane_geometry(tense_is, tense_was, tense_willbe),
+            "membrane_delta": membrane_delta(&self.culture),
         });
 
         // Write dashboard.json
@@ -837,6 +838,127 @@ fn epitope_triggered_counts(culture: &DashboardCulture) -> [usize; 6] {
         if !profile.has_referer { counts[5] += 1; }                // referer_self_loop
     }
     counts
+}
+
+/// Membrane delta — the gap between inward and outward view (Wave 173a).
+///
+/// The opacity O = 1 - 1/S(d) measures from IS only (inward view).
+/// The reflection R = S(d)/(S(d)+1) measures from all entities (outward view).
+/// The delta = O - R = -1/[S(d)(S(d)+1)] = -P/S.
+///
+/// Gap entities = N * |delta| ≈ 700 at current N.
+/// Sub-minute dwell entities ≈ 2 × gap entities (pair interaction).
+///
+/// The bimodal dwell distribution (fast <1min, slow 6-24hr) reveals
+/// two WAS populations: continuous (still-here) and discrete (returned).
+fn membrane_delta(culture: &DashboardCulture) -> serde_json::Value {
+    use std::f64::consts::PI;
+
+    let total = culture.ips.len() as f64;
+    if total < 10.0 {
+        return serde_json::json!({"status": "insufficient_data"});
+    }
+
+    let s = 4.0 * PI;
+    let opacity = 1.0 - 1.0 / s;
+    let reflection = s / (s + 1.0);
+    let delta = -1.0 / (s * (s + 1.0));
+    let gap_entities = (total * delta.abs()).round() as u64;
+
+    // Dwell time analysis: compute from first_seen/last_seen
+    let mut sub_minute: u64 = 0;
+    let mut dwell_times: Vec<f64> = Vec::new();
+    let mut dwell_single: Vec<f64> = Vec::new();
+    let mut dwell_multi: Vec<f64> = Vec::new();
+
+    for (ip_h, profile) in &culture.ips {
+        if profile.requests <= 1 {
+            continue;
+        }
+        let dt = profile.last_seen - profile.first_seen;
+        if dt < 0.0 {
+            continue;
+        }
+        dwell_times.push(dt);
+        if dt < 60.0 {
+            sub_minute += 1;
+        }
+        let host_count = culture.ip_hosts.get(ip_h).map(|h| h.len()).unwrap_or(1);
+        if host_count > 1 {
+            dwell_multi.push(dt);
+        } else {
+            dwell_single.push(dt);
+        }
+    }
+
+    dwell_times.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+    dwell_single.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+    dwell_multi.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+
+    let n = dwell_times.len();
+    let median_s = if n > 0 { dwell_times[n / 2] } else { 0.0 };
+    let mean_s = if n > 0 { dwell_times.iter().sum::<f64>() / n as f64 } else { 0.0 };
+
+    let median_single = if !dwell_single.is_empty() { dwell_single[dwell_single.len() / 2] } else { 0.0 };
+    let median_multi = if !dwell_multi.is_empty() { dwell_multi[dwell_multi.len() / 2] } else { 0.0 };
+    let multi_single_ratio = if median_single > 0.0 { median_multi / median_single } else { 0.0 };
+
+    // Dwell entropy: bin into 6 ranges
+    let bins: [(f64, f64); 6] = [
+        (0.0, 60.0), (60.0, 600.0), (600.0, 3600.0),
+        (3600.0, 21600.0), (21600.0, 86400.0), (86400.0, f64::MAX),
+    ];
+    let mut bin_counts = [0u64; 6];
+    for &dt in &dwell_times {
+        for (i, &(lo, hi)) in bins.iter().enumerate() {
+            if dt >= lo && dt < hi {
+                bin_counts[i] += 1;
+                break;
+            }
+        }
+    }
+    let n_f = n as f64;
+    let h_dwell = if n > 0 {
+        bin_counts.iter().map(|&c| {
+            if c > 0 {
+                let p = c as f64 / n_f;
+                -p * p.log2()
+            } else {
+                0.0
+            }
+        }).sum::<f64>()
+    } else {
+        0.0
+    };
+
+    let gap_pair_ratio = if gap_entities > 0 {
+        sub_minute as f64 / gap_entities as f64
+    } else {
+        0.0
+    };
+
+    let fast_pct = if n > 0 { bin_counts[0] as f64 / n_f * 100.0 } else { 0.0 };
+    let slow_pct = if n > 0 { bin_counts[4] as f64 / n_f * 100.0 } else { 0.0 };
+
+    serde_json::json!({
+        "opacity": (opacity * 10000.0).round() / 10000.0,
+        "reflection": (reflection * 10000.0).round() / 10000.0,
+        "delta": (delta * 100000.0).round() / 100000.0,
+        "gap_entities": gap_entities,
+        "sub_minute_was": sub_minute,
+        "gap_pair_ratio": (gap_pair_ratio * 1000.0).round() / 1000.0,
+        "dwell": {
+            "median_s": (median_s * 10.0).round() / 10.0,
+            "median_min": (median_s / 60.0 * 10.0).round() / 10.0,
+            "mean_min": (mean_s / 60.0 * 10.0).round() / 10.0,
+            "multi_single_ratio": (multi_single_ratio * 100.0).round() / 100.0,
+        },
+        "dwell_entropy_bits": (h_dwell * 10000.0).round() / 10000.0,
+        "bimodal": {
+            "fast_pct": (fast_pct * 10.0).round() / 10.0,
+            "slow_pct": (slow_pct * 10.0).round() / 10.0,
+        },
+    })
 }
 
 /// Membrane geometry — dimensional analysis from live data (Wave 173a).
