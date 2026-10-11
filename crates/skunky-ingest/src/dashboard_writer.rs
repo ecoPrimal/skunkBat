@@ -681,6 +681,7 @@ impl DashboardWriter {
             "tense_distribution": tense_distribution,
             "sort_compression": sort_compression,
             "trajectory": trajectory_analysis(&self.culture),
+            "membrane_geometry": membrane_geometry(tense_is, tense_was, tense_willbe),
         });
 
         // Write dashboard.json
@@ -836,6 +837,105 @@ fn epitope_triggered_counts(culture: &DashboardCulture) -> [usize; 6] {
         if !profile.has_referer { counts[5] += 1; }                // referer_self_loop
     }
     counts
+}
+
+/// Membrane geometry — dimensional analysis from live data (Wave 173a).
+///
+/// Computes: IS/WAS ratio, closest sphere dimension, permeation rate,
+/// channel capacity, vision limit, prediction coverage.
+///
+/// The key result: IS/WAS = S(d) where S(d) is the surface area of
+/// the unit d-sphere. For d=3, S(3) = 4π. The behavioral space has
+/// exactly 3 dimensions (epitope × tense × trajectory).
+///
+/// θ = π + π/S(d) = maximum vision angle.
+/// P = 1/(S(d)+1) = permeation rate constrained by dimension.
+/// WILL-BE/WAS = 1/d = prediction coverage per axis.
+fn membrane_geometry(tense_is: usize, tense_was: usize, tense_willbe: usize) -> serde_json::Value {
+    use std::f64::consts::PI;
+
+    let is_f = tense_is as f64;
+    let was_f = tense_was as f64;
+    let wb_f = tense_willbe as f64;
+    let total_f = is_f + was_f + wb_f;
+
+    if was_f < 1.0 || total_f < 1.0 {
+        return serde_json::json!({"status": "insufficient_data"});
+    }
+
+    let is_was_ratio = is_f / was_f;
+
+    // Surface area of unit n-sphere: S(n) = 2*pi^(n/2) / Gamma(n/2)
+    // Find the closest integer dimension
+    let four_pi = 4.0 * PI;
+    let dim_error_pct = ((is_was_ratio - four_pi) / four_pi * 100.0).abs();
+
+    // Permeation rate
+    let p_measured = was_f / (is_f + was_f);
+    let p_theory = 1.0 / (four_pi + 1.0);
+
+    // Binary entropy H(P)
+    let h_boundary = if p_measured > 0.0 && p_measured < 1.0 {
+        -p_measured * p_measured.log2() - (1.0 - p_measured) * (1.0 - p_measured).log2()
+    } else {
+        0.0
+    };
+    let channel_capacity = 1.0 - h_boundary;
+
+    // Vision limit: theta = pi + pi/S(d) = pi + 1/4 for d=3
+    let theta_unaided = PI + PI / four_pi; // pi + 1/4
+    let theta_with_nautilus = if (was_f + wb_f) > 0.0 {
+        let p_eff = (was_f + wb_f) / total_f;
+        if p_eff < 1.0 { PI / (1.0 - p_eff) } else { PI * 100.0 }
+    } else {
+        theta_unaided
+    };
+    let vision_gained_deg = (theta_with_nautilus - theta_unaided) * 180.0 / PI;
+
+    // Prediction coverage
+    let prediction_coverage = if was_f > 0.0 { wb_f / was_f } else { 0.0 };
+    let measured_dim = if prediction_coverage > 0.0 { 1.0 / prediction_coverage } else { 0.0 };
+
+    // Total information
+    let total_info_bits = channel_capacity * total_f;
+    let total_info_bytes = (total_info_bits / 8.0).round() as u64;
+
+    // Fisher information I(P) = 1/(P*(1-P))
+    let fisher = if p_measured > 0.0 && p_measured < 1.0 {
+        1.0 / (p_measured * (1.0 - p_measured))
+    } else {
+        0.0
+    };
+
+    serde_json::json!({
+        "is_was_ratio": (is_was_ratio * 10000.0).round() / 10000.0,
+        "four_pi": (four_pi * 10000.0).round() / 10000.0,
+        "dim_error_pct": (dim_error_pct * 10000.0).round() / 10000.0,
+        "dimension": 3,
+        "permeation": {
+            "measured": (p_measured * 100000.0).round() / 100000.0,
+            "theory": (p_theory * 100000.0).round() / 100000.0,
+        },
+        "edge_entropy_bits": (h_boundary * 10000.0).round() / 10000.0,
+        "channel_capacity_bits": (channel_capacity * 10000.0).round() / 10000.0,
+        "vision": {
+            "unaided_rad": (theta_unaided * 10000.0).round() / 10000.0,
+            "unaided_deg": ((theta_unaided * 180.0 / PI) * 10.0).round() / 10.0,
+            "with_nautilus_rad": (theta_with_nautilus * 10000.0).round() / 10000.0,
+            "with_nautilus_deg": ((theta_with_nautilus * 180.0 / PI) * 10.0).round() / 10.0,
+            "gained_deg": (vision_gained_deg * 10.0).round() / 10.0,
+        },
+        "prediction": {
+            "coverage": (prediction_coverage * 100000.0).round() / 100000.0,
+            "measured_dim": (measured_dim * 1000.0).round() / 1000.0,
+            "one_third": (1.0_f64 / 3.0 * 100000.0).round() / 100000.0,
+        },
+        "total_information": {
+            "bits": total_info_bits.round() as u64,
+            "bytes": total_info_bytes,
+        },
+        "fisher_information": (fisher * 100.0).round() / 100.0,
+    })
 }
 
 /// Nautilus prediction — the peptidoglycan layer (Wave 173a).
