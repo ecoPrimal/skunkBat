@@ -259,6 +259,33 @@ pub struct NullDimension {
     /// about others, divided by the normalization constant π.
     /// Borromean: no two linked, but all three inseparable.
     pub self_awareness: f64,
+    /// Angular tempo: mean reflexive angle between the three tenses.
+    ///
+    /// Each tense fraction defines an angle on the unit circle.
+    /// The reflexive angle between any two = their angular distance.
+    /// At equilibrium (equal fractions): reflexive = 2π/3 (120°).
+    /// Deviation from 2π/3 = tempo shift.
+    ///
+    /// t = π: the system's conceptual tempo is normalized to π.
+    /// The "wheel in the sky" — each body rotates independently.
+    /// When two bodies align (reflexive = 0): a "bump" — a signal event.
+    /// The rate of alignments approaches π.
+    pub tempo: f64,
+    /// Isotope classification for each epitope: 3 classes of motion.
+    ///
+    /// All things have (at least) 3 classes of motion for the three-body
+    /// proof to work — like quarks have 3 colors, 3 generations.
+    ///
+    /// For epitopes:
+    /// - **Spin** (angular velocity class): how fast the epitope's state changes
+    /// - **Mass** (inertial class): how much evidence is needed to flip it
+    /// - **Charge** (interaction class): how strongly it correlates with others
+    ///
+    /// isotope_classes[i] = (spin, mass, charge) for epitope i.
+    /// Each value 0–2: three flavors per axis.
+    /// Total isotopes = 3³ = 27 possible, but only 6 occupied.
+    /// The occupancy pattern IS the organism's isotopic signature.
+    pub isotope_classes: [(u8, u8, u8); 6],
 }
 
 /// Per-epitope conservation data (from epitope_conservation module).
@@ -379,6 +406,87 @@ impl NullDimension {
         let non_self_count = v_count + d_count; // V and D are the "others" — they move, they're not-yet-known
         let self_awareness = non_self_count as f64 / PI;
 
+        // ── Angular tempo ──
+        // The three tense fractions define angular *extents* on the circle.
+        // IS occupies f_is × 2π arc, then WAS occupies f_was × 2π, then WILLBE.
+        // The midpoint of each arc is the body's angular position:
+        //   pos_IS = f_is × π                    (midpoint of first arc)
+        //   pos_WAS = (2·f_is + f_was) × π       (midpoint of second arc)
+        //   pos_WB = (2·f_is + 2·f_was + f_wb) × π  (midpoint of third arc)
+        // At equilibrium: positions = π/3, π, 5π/3 → separation = 2π/3.
+        // t = π means the system's time constant IS π.
+        let pos_is = f_is * PI;
+        let pos_was = (2.0 * f_is + f_was) * PI;
+        let pos_wb = (2.0 * f_is + 2.0 * f_was + f_wb) * PI;
+        // Reflexive angles: shortest arc between each pair
+        let r01 = {
+            let d = (pos_is - pos_was).abs() % (2.0 * PI);
+            d.min(2.0 * PI - d)
+        };
+        let r12 = {
+            let d = (pos_was - pos_wb).abs() % (2.0 * PI);
+            d.min(2.0 * PI - d)
+        };
+        let r20 = {
+            let d = (pos_wb - pos_is).abs() % (2.0 * PI);
+            d.min(2.0 * PI - d)
+        };
+        let mean_reflexive = (r01 + r12 + r20) / 3.0;
+        // At equilibrium: all three reflexive angles = 2π/3 → variance = 0.
+        // The tempo is the regularity of the spacing:
+        //   tempo = 1 - σ(reflexive) / (2π/3)
+        // tempo = 1.0 at equilibrium (perfect spacing, clock ticks evenly).
+        // tempo < 1.0 when spacing is uneven (clock is irregular).
+        // tempo = 0.0 at maximum irregularity (one body eclipses another).
+        let variance = ((r01 - mean_reflexive).powi(2)
+            + (r12 - mean_reflexive).powi(2)
+            + (r20 - mean_reflexive).powi(2)) / 3.0;
+        let sigma = variance.sqrt();
+        let tempo = (1.0 - sigma / (2.0 * PI / 3.0)).clamp(0.0, 1.0);
+
+        // ── Isotope classes: spin × mass × charge ──
+        // Each epitope gets 3 class values (0, 1, or 2) based on behavior:
+        //   spin  = flip rate class:   0=frozen, 1=moderate, 2=volatile
+        //   mass  = evaluation depth:  0=shallow, 1=moderate, 2=deep
+        //   charge = correlation class: 0=isolated, 1=moderate, 2=entangled
+        // Without conservation data: assign from sort-order position.
+        let mut isotope_classes = [(1u8, 1u8, 1u8); 6];
+        if let Some(fd) = flip_data {
+            for i in 0..6 {
+                // Spin: flip rate → 3 bands
+                let flip_rate = if fd.evaluated[i] > 0 {
+                    fd.flipped[i] as f64 / fd.evaluated[i] as f64
+                } else { 0.0 };
+                let spin = if flip_rate < 0.1 { 0 } else if flip_rate < 0.4 { 1 } else { 2 };
+
+                // Mass: evaluation depth → 3 bands
+                let eval_rate = fd.evaluated[i] as f64 / pop_f;
+                let mass = if eval_rate < 0.3 { 0 } else if eval_rate < 0.7 { 1 } else { 2 };
+
+                // Charge: how far from the mean flip rate (correlation with the ensemble)
+                let mean_flip: f64 = (0..6).map(|j| {
+                    if fd.evaluated[j] > 0 { fd.flipped[j] as f64 / fd.evaluated[j] as f64 } else { 0.0 }
+                }).sum::<f64>() / 6.0;
+                let deviation = (flip_rate - mean_flip).abs();
+                let charge = if deviation < 0.1 { 1 } // moderate — near mean
+                    else if flip_rate > mean_flip { 2 } // entangled — moves with the crowd
+                    else { 0 }; // isolated — moves against
+
+                isotope_classes[i] = (spin, mass, charge);
+            }
+        } else {
+            // Default: assign by information-content rank
+            // High-info epitopes = high spin, high mass. Low-info = low.
+            isotope_classes = [
+                (2, 2, 2), // burst_ratio: volatile, deep, entangled
+                (2, 2, 1), // reading_deficit: volatile, deep, moderate
+                (1, 1, 1), // ua_pool_poverty: moderate all
+                (1, 1, 0), // sec_fetch_monotone: moderate, moderate, isolated
+                (0, 2, 1), // session_absent: frozen, deep, moderate
+                (0, 1, 0), // referer_self_loop: frozen, moderate, isolated
+            ];
+        }
+
         NullDimension {
             product,
             product_error,
@@ -389,6 +497,8 @@ impl NullDimension {
             vdj_distribution: (v_count, d_count, j_count),
             vdj_gain_bits,
             self_awareness,
+            tempo,
+            isotope_classes,
         }
     }
 }
@@ -642,5 +752,68 @@ mod tests {
             c.tense >= 0.0,
             "tense compression should be non-negative"
         );
+    }
+
+    #[test]
+    fn tempo_equilibrium_is_one() {
+        // Equal tense distribution: tempo should be 1.0 (the system's clock is π)
+        let nd = NullDimension::compute((100, 100, 100), 300, None);
+        assert!(
+            (nd.tempo - 1.0).abs() < 0.001,
+            "equilibrium tempo should be 1.0 (t = π), got {}", nd.tempo
+        );
+    }
+
+    #[test]
+    fn tempo_shifts_with_imbalance() {
+        let balanced = NullDimension::compute((100, 100, 100), 300, None);
+        let skewed = NullDimension::compute((200, 80, 20), 300, None);
+        assert!(
+            (skewed.tempo - balanced.tempo).abs() > 0.001,
+            "skewed distribution should shift tempo away from 1.0. balanced={}, skewed={}",
+            balanced.tempo, skewed.tempo
+        );
+    }
+
+    #[test]
+    fn isotope_default_classes() {
+        // Without conservation data: default isotope classification
+        let nd = NullDimension::compute((100, 100, 100), 300, None);
+        // burst_ratio: (2,2,2) — volatile, deep, entangled
+        assert_eq!(nd.isotope_classes[0], (2, 2, 2), "burst_ratio should be highest isotope");
+        // referer_self_loop: (0,1,0) — frozen, moderate, isolated
+        assert_eq!(nd.isotope_classes[5], (0, 1, 0), "referer_self_loop should be lowest");
+    }
+
+    #[test]
+    fn isotope_with_conservation_data() {
+        let flip = EpitopeFlipData {
+            flipped:   [80, 5, 0, 60, 2, 3],
+            evaluated: [100, 100, 10, 100, 100, 100],
+        };
+        let nd = NullDimension::compute((100, 100, 100), 100, Some(&flip));
+        // burst flips 80% → spin=2 (volatile)
+        assert_eq!(nd.isotope_classes[0].0, 2, "burst spin should be 2 (volatile)");
+        // reading flips 5% → spin=0 (frozen)
+        assert_eq!(nd.isotope_classes[1].0, 0, "reading spin should be 0 (frozen)");
+        // ua_pool evaluated 10% → mass=0 (shallow)
+        assert_eq!(nd.isotope_classes[2].1, 0, "ua_pool mass should be 0 (shallow)");
+        // sec_fetch evaluated 100% → mass=2 (deep)
+        assert_eq!(nd.isotope_classes[3].1, 2, "sec_fetch mass should be 2 (deep)");
+    }
+
+    #[test]
+    fn isotope_sort_gives_27_possible_states() {
+        // 3 spin × 3 mass × 3 charge = 27 possible isotopes
+        // Each epitope occupies one of these 27 slots.
+        // The occupancy pattern is the isotopic signature.
+        let nd = NullDimension::compute((100, 100, 100), 300, None);
+        for (s, m, c) in &nd.isotope_classes {
+            assert!(*s <= 2, "spin must be 0-2");
+            assert!(*m <= 2, "mass must be 0-2");
+            assert!(*c <= 2, "charge must be 0-2");
+        }
+        // Total possible states
+        assert_eq!(3u32 * 3 * 3, 27, "3×3×3 = 27 isotope states");
     }
 }

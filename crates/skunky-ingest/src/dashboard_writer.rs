@@ -680,6 +680,15 @@ impl DashboardWriter {
             "vdj_gain_bits": r6(null_dim.vdj_gain_bits),
             "self_awareness": r6(null_dim.self_awareness),
             "gordian_proof": "self = \u{2211}others / \u{03c0}",
+            "tempo": r6(null_dim.tempo),
+            "t_equals_pi": "t = \u{03c0}",
+            "isotope_classes": null_dim.isotope_classes.iter().enumerate().map(|(i, (s, m, c))| {
+                serde_json::json!({
+                    "epitope": crate::sort_compression::EPITOPE_NAMES[i],
+                    "spin": s, "mass": m, "charge": c,
+                    "isotope": format!("{}{}{}", s, m, c),
+                })
+            }).collect::<Vec<_>>(),
             "compression_inequality": format!(
                 "H(D) ≥ H(D|α) ≥ H(D|epitope) ≥ H(D|epitope,vdj) ≥ H(D|epitope,tense)"
             ),
