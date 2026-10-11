@@ -40,6 +40,7 @@ pub mod rpc;
 pub mod abuse_reporter;
 pub mod bloom_sensor;
 pub mod bloom_emitter;
+pub mod membrane_geometry;
 pub mod membrane_stack;
 // dormant: journey_tracer (Wave 171 — tests only, never wired)
 pub mod scatter_nft;

@@ -493,6 +493,40 @@ impl TopologyWriter {
                 }
             }
         }
+
+        // ── Membrane geometry (Paper 75) ──
+        // The membrane IS its own frame. 6 epitope axes → 19 hex positions.
+        self.write_membrane_geometry(profiles);
+    }
+
+    /// Compute and write membrane geometry — parallelogram lattice from epitope sort.
+    fn write_membrane_geometry(&self, profiles: &[EntityProfile]) {
+        use crate::membrane_geometry;
+
+        let entity_data: Vec<(String, u8)> = profiles
+            .iter()
+            .map(|p| (p.label.clone(), membrane_geometry::trigger_bits(p)))
+            .collect();
+        let geom = membrane_geometry::compute_membrane_geometry(&entity_data);
+
+        tracing::info!(
+            entities = geom.total_entities,
+            occupied = geom.occupied,
+            null_spaces = geom.null_spaces,
+            null_ratio = format!("{:.3}", geom.null_ratio).as_str(),
+            "🔬 membrane geometry ({} positions, {} shells)",
+            geom.positions,
+            geom.shells.len()
+        );
+
+        if let Some(parent) = self.output_path.parent() {
+            let geom_path = parent.join("membrane.json");
+            if let Ok(json) = serde_json::to_string_pretty(&geom) {
+                if let Err(e) = std::fs::write(&geom_path, &json) {
+                    tracing::warn!(error = %e, "membrane.json write failed");
+                }
+            }
+        }
     }
 
     /// Build and append an epitope sort snapshot to the rolling history buffer,
