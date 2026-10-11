@@ -680,6 +680,7 @@ impl DashboardWriter {
             "epitope_summary": epitope_summary,
             "tense_distribution": tense_distribution,
             "sort_compression": sort_compression,
+            "trajectory": trajectory_analysis(&self.culture),
         });
 
         // Write dashboard.json
@@ -835,6 +836,67 @@ fn epitope_triggered_counts(culture: &DashboardCulture) -> [usize; 6] {
         if !profile.has_referer { counts[5] += 1; }                // referer_self_loop
     }
     counts
+}
+
+/// Sweep 2 trajectory analysis — what arcs do returning visitors trace?
+///
+/// For each IP that visited >1 subdomain, we record the set of hosts.
+/// The trajectory is the rotation (how many subdomains), direction
+/// (which cluster), and distance (how many requests per subdomain).
+fn trajectory_analysis(culture: &DashboardCulture) -> serde_json::Value {
+    let mut multi_host_ips: usize = 0;
+    let mut single_host_ips: usize = 0;
+    let mut host_visit_counts: HashMap<String, usize> = HashMap::new();
+    let mut max_breadth: usize = 0;
+    let mut breadth_sum: usize = 0;
+
+    // Count cross-subdomain trajectories
+    for (ip_h, hosts) in &culture.ip_hosts {
+        if hosts.len() > 1 {
+            multi_host_ips += 1;
+            breadth_sum += hosts.len();
+            if hosts.len() > max_breadth {
+                max_breadth = hosts.len();
+            }
+            for h in hosts {
+                *host_visit_counts.entry(h.clone()).or_insert(0) += 1;
+            }
+        } else {
+            single_host_ips += 1;
+        }
+        let _ = ip_h; // keyed by hash, no raw IP
+    }
+
+    // Top cross-visited hosts (which subdomains appear in multi-host trajectories)
+    let mut top_hosts: Vec<(String, usize)> = host_visit_counts.into_iter().collect();
+    top_hosts.sort_by(|a, b| b.1.cmp(&a.1));
+    top_hosts.truncate(10);
+
+    let avg_breadth = if multi_host_ips > 0 {
+        breadth_sum as f64 / multi_host_ips as f64
+    } else {
+        0.0
+    };
+
+    // Returning visitor trajectory (WAS sweep)
+    let returning_with_arc: usize = culture.ips.values()
+        .filter(|p| p.requests > 1 && p.host_count > 1)
+        .count();
+    let returning_single: usize = culture.ips.values()
+        .filter(|p| p.requests > 1 && p.host_count <= 1)
+        .count();
+
+    serde_json::json!({
+        "multi_host_ips": multi_host_ips,
+        "single_host_ips": single_host_ips,
+        "max_breadth": max_breadth,
+        "avg_breadth": (avg_breadth * 10.0).round() / 10.0,
+        "returning_with_arc": returning_with_arc,
+        "returning_single_surface": returning_single,
+        "top_cross_hosts": top_hosts.iter()
+            .map(|(h, c)| serde_json::json!({"host": h, "cross_visits": c}))
+            .collect::<Vec<_>>(),
+    })
 }
 
 #[cfg(test)]
