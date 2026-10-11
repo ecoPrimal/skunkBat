@@ -441,44 +441,12 @@ impl TopologyWriter {
         // Build a compact snapshot and append to the rolling buffer.
         self.append_history_snapshot(&topology);
 
-        // ── Experiment 4: Epitope conservation (Paper 74) ──
-        // Compare the last two history snapshots to measure compass stability.
-        self.run_conservation_experiment();
-
         // Save the sourdough culture every 10 topology flushes (~5000 entries).
         // Always save on explicit flush (shutdown path).
         self.culture_save_counter += 1;
         if self.culture_save_counter % 10 == 0 || self.culture_save_counter == 1 {
             self.save_culture();
         }
-    }
-
-    /// Run Experiment 4 (Paper 74): epitope conservation across consecutive flushes.
-    ///
-    /// Compares the last two history snapshots to measure how stable the
-    /// epitope compass is between topology flushes.
-    fn run_conservation_experiment(&self) {
-        if self.history.len() < 2 {
-            return;
-        }
-        let older = &self.history[self.history.len() - 2];
-        let newer = &self.history[self.history.len() - 1];
-
-        // Only compare raw snapshots (coil=0) for meaningful conservation
-        if older.coil > 0 || newer.coil > 0 {
-            return;
-        }
-
-        let result = crate::epitope_conservation::epitope_conservation(older, newer);
-
-        tracing::info!(
-            matched = result.matched_entities,
-            mean_hamming = format!("{:.3}", result.mean_hamming).as_str(),
-            conservation = format!("{:.3}", result.conservation_ratio).as_str(),
-            stable = result.compass_stable,
-            gap_secs = result.gap_secs,
-            "🧭 Exp4 conservation (Paper 74: compass stability)"
-        );
     }
 
     /// Run Paper 69 falsification experiments on the current entity population.
@@ -621,6 +589,24 @@ impl TopologyWriter {
         };
 
         self.history.push(snapshot);
+
+        // ── Experiment 4: Epitope conservation (Paper 74) ──
+        // Compare the last two raw snapshots BEFORE coiling compresses them.
+        if self.history.len() >= 2 {
+            let older = &self.history[self.history.len() - 2];
+            let newer = &self.history[self.history.len() - 1];
+            if older.coil == 0 && newer.coil == 0 {
+                let result = crate::epitope_conservation::epitope_conservation(older, newer);
+                tracing::info!(
+                    matched = result.matched_entities,
+                    mean_hamming = format!("{:.3}", result.mean_hamming).as_str(),
+                    conservation = format!("{:.3}", result.conservation_ratio).as_str(),
+                    stable = result.compass_stable,
+                    gap_secs = result.gap_secs,
+                    "🧭 Exp4 conservation (Paper 74: compass stability)"
+                );
+            }
+        }
 
         // ── Coil the genome ──
         // History doesn't roll — it coils and compresses.
