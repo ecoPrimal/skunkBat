@@ -683,6 +683,7 @@ impl DashboardWriter {
             "trajectory": trajectory_analysis(&self.culture),
             "membrane_geometry": membrane_geometry(tense_is, tense_was, tense_willbe),
             "membrane_delta": membrane_delta(&self.culture),
+            "threebody_pi": threebody_pi(tense_is, tense_was, tense_willbe),
         });
 
         // Write dashboard.json
@@ -1057,6 +1058,101 @@ fn membrane_geometry(tense_is: usize, tense_was: usize, tense_willbe: usize) -> 
             "bytes": total_info_bytes,
         },
         "fisher_information": (fisher * 100.0).round() / 100.0,
+    })
+}
+
+/// Three-body π mechanics (coGen 41).
+///
+/// Maps the tense distribution into E = mc² where every constant is π.
+///   E = IS/WAS ≈ 4π        (energy: observation rate)
+///   m = NP/WAS = 4/3       (mass: 1 + prediction_coverage)
+///   c² = E/m ≈ 3π = dπ     (speed²: P/NP ratio)
+///
+/// The mass survives flattening: set π=1 → E=4, c²=3, m=4/3 (unchanged).
+/// Mass is the only quantity that does not depend on π.
+///
+/// Also computes the Euler–Gelfond bridge:
+///   e^(π+1) ≈ 20π  (0.11% error)
+///   where 20 ≈ e^π − π (the famous near-integer)
+fn threebody_pi(tense_is: usize, tense_was: usize, tense_willbe: usize) -> serde_json::Value {
+    use std::f64::consts::{E, PI};
+
+    let is_f = tense_is as f64;
+    let was_f = tense_was as f64;
+    let wb_f = tense_willbe as f64;
+    let np_f = was_f + wb_f;
+
+    if was_f < 1.0 || np_f < 1.0 {
+        return serde_json::json!({"status": "insufficient_data"});
+    }
+
+    // E = mc² in the membrane
+    let energy = is_f / was_f;          // IS/WAS ≈ 4π
+    let mass = np_f / was_f;            // NP/WAS = 1 + 1/d ≈ 4/3
+    let c_squared = energy / mass;      // IS/NP ≈ 3π = dπ = P/NP
+
+    // Theoretical values
+    let d = 3.0_f64;
+    let energy_theory = 4.0 * PI;
+    let mass_theory = (d + 1.0) / d;    // 4/3
+    let c2_theory = d * PI;             // 3π
+
+    // Flattening: set π=1, mass survives
+    let e_flat = 4.0;                   // 4π → 4
+    let c2_flat = 3.0;                  // 3π → 3
+    let m_flat = e_flat / c2_flat;      // 4/3 (unchanged)
+
+    // Euler–Gelfond bridge
+    let e_to_pi = E.powf(PI);           // e^π ≈ 23.14
+    let near_twenty = e_to_pi - PI;     // e^π − π ≈ 20
+    let e_to_pi_plus_1 = E.powf(PI + 1.0); // e^(π+1) ≈ 62.90
+    let twenty_pi = 20.0 * PI;          // 20π ≈ 62.83
+    let gelfond_err = ((e_to_pi_plus_1 - twenty_pi) / twenty_pi * 100.0).abs();
+    let near_int_gap = e_to_pi - PI - 20.0; // the P≠NP remainder
+
+    // Archimedes remainder: π − 3
+    let archimedes_gap = PI - d;
+
+    // Complex projection: z = IS + i·NP, |z| rotation by i^π
+    // arg(z) = atan(NP/IS) = atan(1/(dπ))
+    let z_arg = (1.0 / c_squared).atan();
+
+    // P/NP ratio error vs dπ
+    let pnp_err = ((c_squared - c2_theory) / c2_theory * 100.0).abs();
+
+    let r6 = |v: f64| (v * 1_000_000.0).round() / 1_000_000.0;
+    let r4 = |v: f64| (v * 10_000.0).round() / 10_000.0;
+
+    serde_json::json!({
+        "emc2": {
+            "energy": r6(energy),
+            "mass": r6(mass),
+            "c_squared": r6(c_squared),
+            "c": r6(c_squared.sqrt()),
+        },
+        "theory": {
+            "energy_4pi": r4(energy_theory),
+            "mass_4_3": r6(mass_theory),
+            "c2_3pi": r4(c2_theory),
+        },
+        "errors_pct": {
+            "energy": r4(((energy - energy_theory) / energy_theory * 100.0).abs()),
+            "c_squared": r4(pnp_err),
+        },
+        "flattening": {
+            "pi_equals_1": { "E": e_flat, "c2": c2_flat, "m": r6(m_flat) },
+            "mass_unchanged": (m_flat - mass_theory).abs() < 1e-10,
+        },
+        "euler_gelfond": {
+            "e_to_pi": r4(e_to_pi),
+            "near_twenty": r6(near_twenty),
+            "near_int_gap": r6(near_int_gap),
+            "e_to_pi_plus_1": r4(e_to_pi_plus_1),
+            "twenty_pi": r4(twenty_pi),
+            "approx_error_pct": r4(gelfond_err),
+        },
+        "archimedes_gap": r6(archimedes_gap),
+        "z_arg_over_pi": r6(z_arg / PI),
     })
 }
 
