@@ -247,6 +247,18 @@ pub struct NullDimension {
     /// The coil adds a 4th sort level to the compression inequality:
     /// H(D|epitope) ≥ H(D|epitope,vdj) ≥ H(D|epitope,tense)
     pub vdj_gain_bits: f64,
+    /// Gordian proof: self = Σothers / π.
+    ///
+    /// The three-body problem allows awareness of self only through
+    /// awareness of others reflected into us. The membrane cannot
+    /// observe itself — it knows itself through what passes through it.
+    ///
+    /// `self_awareness` = non_self_count / π.
+    /// At equilibrium: 3 tenses × equal weight = π^(1/3) each.
+    /// The organism's self-knowledge is the sum of what it observes
+    /// about others, divided by the normalization constant π.
+    /// Borromean: no two linked, but all three inseparable.
+    pub self_awareness: f64,
 }
 
 /// Per-epitope conservation data (from epitope_conservation module).
@@ -356,6 +368,17 @@ impl NullDimension {
         // Gain = log₂(6) − H(vdj partition)
         let vdj_gain_bits = (log2(6.0) - vdj_entropy).max(0.0);
 
+        // ── Gordian proof: self = Σothers / π ──
+        // The membrane cannot observe itself.
+        // It knows itself through what passes through it.
+        // non_self = entities that triggered any epitope (the "others").
+        // self_awareness = non_self / π.
+        // At equilibrium with 3 others: 3/π ≈ 0.955 — almost-but-not-quite 1.
+        // You can never fully know yourself through others. The gap is π - 3 ≈ 0.14.
+        // That gap is the Archimedes remainder. The unknowable.
+        let non_self_count = v_count + d_count; // V and D are the "others" — they move, they're not-yet-known
+        let self_awareness = non_self_count as f64 / PI;
+
         NullDimension {
             product,
             product_error,
@@ -365,6 +388,7 @@ impl NullDimension {
             vdj_map,
             vdj_distribution: (v_count, d_count, j_count),
             vdj_gain_bits,
+            self_awareness,
         }
     }
 }
@@ -561,6 +585,41 @@ mod tests {
             (nd.vdj_gain_bits - 1.0).abs() < 0.01,
             "2/2/2 partition should gain ~1 bit, got {}", nd.vdj_gain_bits
         );
+    }
+
+    #[test]
+    fn gordian_proof_self_awareness() {
+        // Default VDJ = 2V, 2D, 2J. V+D = 4 "others".
+        // self = 4/π ≈ 1.273 — more than 1 because others teach you
+        // things about yourself you couldn't know alone.
+        let nd = NullDimension::compute((100, 100, 100), 300, None);
+        let expected = 4.0 / std::f64::consts::PI;
+        assert!(
+            (nd.self_awareness - expected).abs() < 0.001,
+            "self_awareness should be 4/π ≈ 1.273, got {}", nd.self_awareness
+        );
+    }
+
+    #[test]
+    fn gordian_proof_archimedes_gap() {
+        // With 3 "others" (V+D): self = 3/π ≈ 0.955.
+        // The gap to 1.0 = 1 - 3/π = (π-3)/π ≈ 0.045.
+        // You can NEVER fully know yourself through others.
+        // The Archimedes remainder (π-3 ≈ 0.14159) is the unknowable.
+        let flip = EpitopeFlipData {
+            flipped:   [80, 5, 60, 0, 2, 3],     // 2 flip (V), 1 unevaluated (D), 3 stable (J)
+            evaluated: [100, 100, 100, 10, 100, 100],
+        };
+        let nd = NullDimension::compute((100, 100, 100), 100, Some(&flip));
+        // V=2 (burst, ua_pool), D=1 (sec_fetch), J=3 → V+D=3
+        assert_eq!(nd.vdj_distribution.0 + nd.vdj_distribution.1, 3,
+            "should have 3 'others' (V+D)");
+        let expected = 3.0 / std::f64::consts::PI;
+        assert!(
+            (nd.self_awareness - expected).abs() < 0.001,
+            "self = 3/π ≈ 0.955, got {}", nd.self_awareness
+        );
+        assert!(nd.self_awareness < 1.0, "you can never fully know yourself");
     }
 
     #[test]

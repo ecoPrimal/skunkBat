@@ -678,6 +678,8 @@ impl DashboardWriter {
                 "J": null_dim.vdj_distribution.2,
             },
             "vdj_gain_bits": r6(null_dim.vdj_gain_bits),
+            "self_awareness": r6(null_dim.self_awareness),
+            "gordian_proof": "self = \u{2211}others / \u{03c0}",
             "compression_inequality": format!(
                 "H(D) ≥ H(D|α) ≥ H(D|epitope) ≥ H(D|epitope,vdj) ≥ H(D|epitope,tense)"
             ),
