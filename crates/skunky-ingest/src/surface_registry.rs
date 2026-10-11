@@ -35,7 +35,7 @@ const REGISTRY: &[Entry] = &[
     Entry { key: "detroit", name: "Detroit Evidence", domain: ContentDomain::Evidence },
     Entry { key: "evidence", name: "Evidence Archive", domain: ContentDomain::Evidence },
     Entry { key: "tuebor", name: "Tuebor", domain: ContentDomain::Evidence },
-    // Immune surfaces
+    // Immune surfaces (monitor is infrastructure-grade immune — observatory, not antibody)
     Entry { key: "antibody", name: "Antibody", domain: ContentDomain::Immune },
     Entry { key: "antigen", name: "Antigen", domain: ContentDomain::Immune },
     Entry { key: "bloom", name: "Bloom", domain: ContentDomain::Immune },
@@ -45,7 +45,7 @@ const REGISTRY: &[Entry] = &[
     Entry { key: "interferon", name: "Interferon", domain: ContentDomain::Immune },
     Entry { key: "lysozyme", name: "Lysozyme", domain: ContentDomain::Immune },
     Entry { key: "macrophage", name: "Macrophage", domain: ContentDomain::Immune },
-    Entry { key: "monitor", name: "Monitor", domain: ContentDomain::Immune },
+    Entry { key: "monitor", name: "Monitor", domain: ContentDomain::Infrastructure },
     Entry { key: "opsonize", name: "Opsonize", domain: ContentDomain::Immune },
     Entry { key: "receptor", name: "Receptor", domain: ContentDomain::Immune },
     Entry { key: "thymus", name: "Thymus", domain: ContentDomain::Immune },
@@ -188,8 +188,9 @@ mod tests {
     }
 
     #[test]
-    fn monitor_is_immune() {
-        // Verify monitor stayed in immune domain (was in IMMUNE_SURFACES)
-        assert!(is_immune("monitor"));
+    fn monitor_is_infrastructure() {
+        // Monitor is an observatory — infrastructure, not antibody
+        assert!(!is_immune("monitor"));
+        assert_eq!(surface_domain("monitor"), ContentDomain::Infrastructure);
     }
 }

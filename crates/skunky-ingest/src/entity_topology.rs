@@ -249,6 +249,17 @@ impl TopologyBuilder {
         self.entities.len()
     }
 
+    /// Borrow the raw entity accumulators for campfire analysis.
+    ///
+    /// Returns references to the live data — no cloning.
+    /// Used by campfire_writer to generate visitor/page/campfire JSON
+    /// from the same data that feeds the topology.
+    pub fn entity_accums(&self) -> Vec<(EntityId, &EntityAccum)> {
+        self.entities.iter()
+            .map(|(id, accum)| (id.clone(), accum))
+            .collect()
+    }
+
     /// Take a snapshot without consuming the builder — clones internal
     /// state so accumulation continues uninterrupted.
     pub fn snapshot(&self) -> Vec<EntityProfile> {
@@ -393,6 +404,17 @@ impl TopologyWriter {
                             bytes = json.len(),
                             "🗺️ topology.json updated"
                         );
+
+                        // Campfire pipeline — write visitor/page/campfire JSON
+                        // from the same entity data, in the same cycle.
+                        // Replaces three Python cron scripts (807 lines).
+                        let campfire_config = crate::campfire_writer::CampfireWriterConfig::golgi_default();
+                        let accums = self.builder.entity_accums();
+                        if let Err(e) = crate::campfire_writer::write_all(&campfire_config, &accums) {
+                            tracing::warn!(error = %e, "🔥 campfire write failed");
+                        } else {
+                            tracing::debug!("🔥 campfire JSON updated");
+                        }
                     }
                     Err(e) => {
                         tracing::warn!(
