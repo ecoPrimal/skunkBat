@@ -652,6 +652,37 @@ impl DashboardWriter {
             "grid_feedback": sort_result.quantize_for_grid(),
         });
 
+        // [∅]D — null dimension + V(D)J overlay (Wave 175).
+        // Coils the tense distribution and epitope conservation into the
+        // perturbation perspective: how far from singularity is the current state?
+        let null_dim = crate::sort_compression::NullDimension::compute(
+            (tense_is, tense_was, tense_willbe),
+            self.culture.ips.len(),
+            None, // TODO(Wave 175b): wire conservation flip data from topology
+        );
+        let r6 = |v: f64| (v * 1_000_000.0).round() / 1_000_000.0;
+        let null_dimension = serde_json::json!({
+            "product": r6(null_dim.product),
+            "product_error": r6(null_dim.product_error),
+            "body_constant": r6(null_dim.body_constant),
+            "observation_cost": r6(null_dim.observation_cost),
+            "perturbation": r6(null_dim.perturbation),
+            "vdj_map": null_dim.vdj_map.iter().map(|r| match r {
+                crate::sort_compression::VdjRole::V => "V",
+                crate::sort_compression::VdjRole::D => "D",
+                crate::sort_compression::VdjRole::J => "J",
+            }).collect::<Vec<_>>(),
+            "vdj_distribution": {
+                "V": null_dim.vdj_distribution.0,
+                "D": null_dim.vdj_distribution.1,
+                "J": null_dim.vdj_distribution.2,
+            },
+            "vdj_gain_bits": r6(null_dim.vdj_gain_bits),
+            "compression_inequality": format!(
+                "H(D) ≥ H(D|α) ≥ H(D|epitope) ≥ H(D|epitope,vdj) ≥ H(D|epitope,tense)"
+            ),
+        });
+
         let dashboard = serde_json::json!({
             "ts": now,
             "utc": chrono::Utc::now().format("%Y-%m-%d %H:%M:%S UTC").to_string(),
@@ -680,6 +711,11 @@ impl DashboardWriter {
             "epitope_summary": epitope_summary,
             "tense_distribution": tense_distribution,
             "sort_compression": sort_compression,
+            "null_dimension": null_dimension,
+            "trajectory": trajectory_analysis(&self.culture),
+            "membrane_geometry": membrane_geometry(tense_is, tense_was, tense_willbe),
+            "membrane_delta": membrane_delta(&self.culture),
+            "threebody_pi": threebody_pi(tense_is, tense_was, tense_willbe),
         });
 
         // Write dashboard.json
