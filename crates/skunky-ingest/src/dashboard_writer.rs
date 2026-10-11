@@ -629,26 +629,27 @@ impl DashboardWriter {
             "will_be": tense_willbe,
         });
 
-        // Sort compression scores (Paper 48).
-        // Approximate bits of compression at each sort level from the current population.
-        let total_ips = self.culture.ips.len().max(1) as f64;
-        let sort_alpha = (total_ips.ln() / 2.0_f64.ln()).max(0.0); // log2(n) baseline
-        let sort_epitope = {
-            let clusters = self.culture.epitope_collisions.len().max(1) as f64;
-            sort_alpha - (clusters.ln() / 2.0_f64.ln()).max(0.0) // reduction from clustering
+        // Sort compression scores (Paper 48) — via sort_compression module.
+        let epitope_triggered = epitope_triggered_counts(&self.culture);
+        let sort_pop = crate::sort_compression::SortPopulation {
+            n: self.culture.ips.len(),
+            k: self.culture.epitope_collisions.len(),
+            epitope_triggered,
+            tense: (tense_is, tense_was, tense_willbe),
         };
-        let sort_tense = {
-            // Tense sort partitions into 3 buckets (is/was/willbe).
-            // Compression = log2(n) - sum(p_i * log2(p_i)) for the 3 buckets.
-            let p_is = tense_is as f64 / total_ips;
-            let p_was = tense_was as f64 / total_ips;
-            let h = |p: f64| -> f64 { if p > 0.0 { -p * (p.ln() / 2.0_f64.ln()) } else { 0.0 } };
-            sort_alpha - (h(p_is) + h(p_was))
-        };
+        let sort_result = sort_pop.compress();
+        let (strongest_idx, strongest_gain) = sort_result.strongest_epitope();
         let sort_compression = serde_json::json!({
-            "alpha": (sort_alpha * 10.0).round() / 10.0,
-            "epitope": (sort_epitope * 10.0).round() / 10.0,
-            "tense": (sort_tense * 10.0).round() / 10.0,
+            "alpha": (sort_result.alpha * 10.0).round() / 10.0,
+            "epitope": (sort_result.epitope * 10.0).round() / 10.0,
+            "tense": (sort_result.tense * 10.0).round() / 10.0,
+            "total_gain": (sort_result.total_gain() * 10.0).round() / 10.0,
+            "ratio": (sort_result.ratio() * 1000.0).round() / 1000.0,
+            "strongest_epitope": {
+                "name": crate::sort_compression::EPITOPE_NAMES[strongest_idx],
+                "gain_bits": (strongest_gain * 100.0).round() / 100.0,
+            },
+            "grid_feedback": sort_result.quantize_for_grid(),
         });
 
         let dashboard = serde_json::json!({
@@ -806,6 +807,34 @@ impl DashboardWriter {
             }
         }
     }
+}
+
+/// Count how many IPs trigger each of the 6 canonical epitopes (Paper 48).
+///
+/// Uses IpProfile heuristics that approximate the entity-level epitope tests:
+///   0. burst_ratio     — >60 req/min sustained
+///   1. reading_deficit — >100 requests, lifespan <60s (no reading pauses)
+///   2. ua_pool_poverty — only 1 User-Agent for >10 requests
+///   3. sec_fetch_monotone — never sent Sec-Fetch headers
+///   4. session_absent  — never sent cookies
+///   5. referer_self_loop — never sent an external Referer
+fn epitope_triggered_counts(culture: &DashboardCulture) -> [usize; 6] {
+    let mut counts = [0usize; 6];
+    for profile in culture.ips.values() {
+        if profile.requests < 3 {
+            continue; // too few requests to evaluate
+        }
+        let span = (profile.last_seen - profile.first_seen).max(1.0);
+        let rpm = profile.requests as f64 / (span / 60.0);
+
+        if rpm > 60.0 { counts[0] += 1; }                          // burst_ratio
+        if profile.requests > 100 && span < 60.0 { counts[1] += 1; } // reading_deficit
+        if profile.ua_pool_size <= 1 { counts[2] += 1; }           // ua_pool_poverty
+        if !profile.has_sec_fetch { counts[3] += 1; }              // sec_fetch_monotone
+        if !profile.has_cookie { counts[4] += 1; }                 // session_absent
+        if !profile.has_referer { counts[5] += 1; }                // referer_self_loop
+    }
+    counts
 }
 
 #[cfg(test)]

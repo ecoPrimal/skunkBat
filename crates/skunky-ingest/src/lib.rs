@@ -55,6 +55,7 @@ pub mod scatter_temporal;
 pub mod scyborg_prism;
 pub mod signal_spine;
 pub mod signal_writer;
+pub mod sort_compression;
 pub(crate) mod squirrel_announce;
 // dormant: plasmid (Wave 171 — behavioral tokens, tests only; ConservedPlasmid in scatter_types is live)
 pub mod campfire_util;
