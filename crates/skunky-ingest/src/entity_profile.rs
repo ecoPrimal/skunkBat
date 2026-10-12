@@ -384,65 +384,37 @@ impl EntityAccum {
 /// Chrome stable version. Updated when Chrome releases.
 const CHROME_CURRENT_STABLE: u16 = 155;
 
-pub(crate) fn build_profile(entity_id: EntityId, accum: EntityAccum) -> EntityProfile {
-    let duration_secs = if accum.last_ts > accum.first_ts {
-        accum.last_ts - accum.first_ts
-    } else {
-        0.0
-    };
-    let duration_hours = duration_secs / 3600.0;
-    let avg_rps = if duration_secs > 0.0 {
-        accum.total as f64 / duration_secs
-    } else {
-        0.0
-    };
 
-    // Chrome version lag
-    let top_chrome: u16 = accum.chrome_versions.iter()
-        .max_by_key(|(_, c)| *c)
-        .map(|(v, _)| *v)
-        .unwrap_or(0);
-    let chrome_lag = if top_chrome > 0 {
-        CHROME_CURRENT_STABLE.saturating_sub(top_chrome)
-    } else {
-        0
-    };
+// ── Extracted helpers — compassion refactor (Wave 173) ──
+//
+// build_profile was 504 lines. Each helper owns one concern.
 
-    // Capture platform before any moves out of accum (Paper 76)
-    let entity_platform = accum.platform();
-    let is_mobile_entity = matches!(entity_platform, "iPhone" | "Android");
-
-    // Timing
-    let mut ts_sorted: Vec<f64> = accum.timestamps;
+/// Compute timing profile from sorted timestamps.
+/// Includes transport channel jitter correction (Paper 76).
+fn compute_timing(timestamps: Vec<f64>, is_mobile: bool) -> (TimingProfile, Vec<f64>) {
+    let mut ts_sorted = timestamps;
     ts_sorted.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
     let intervals: Vec<f64> = ts_sorted.windows(2)
         .map(|w| w[1] - w[0])
         .filter(|&i| i > 0.001 && i < 60.0)
         .collect();
 
-    let timing = if intervals.len() > 2 {
+    let profile = if intervals.len() > 2 {
         let sum: f64 = intervals.iter().sum();
         let mean = sum / intervals.len() as f64;
-        let mut sorted_intervals = intervals.clone();
-        sorted_intervals.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
-        let median = sorted_intervals[sorted_intervals.len() / 2];
-        let variance: f64 = intervals.iter().map(|i| (i - mean).powi(2)).sum::<f64>() / intervals.len() as f64;
-        let stdev = variance.sqrt();
-        let cv = if mean > 0.0 { stdev / mean } else { 0.0 };
+        let mut sorted = intervals.clone();
+        sorted.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+        let median = sorted[sorted.len() / 2];
+        let variance: f64 = intervals.iter()
+            .map(|i| (i - mean).powi(2)).sum::<f64>() / intervals.len() as f64;
+        let cv = if mean > 0.0 { variance.sqrt() / mean } else { 0.0 };
         let bursts = intervals.iter().filter(|&&i| i < 0.1).count() as u64;
         let pauses = intervals.iter().filter(|&&i| i > 2.0).count() as u64;
         let classification = if cv < 0.15 { "METRONOMIC" }
             else if cv < 0.5 { "SEMI-REGULAR" }
             else { "VARIED" };
 
-        // Transport channel correction (Paper 76).
-        // Mobile connections (cell tower) add jitter that inflates burst_ratio.
-        // The cell tower is a membrane — signals pass through it distorted.
-        // Widen the burst threshold proportionally to excess jitter.
-        let is_mobile = is_mobile_entity;
         let transport_correction = if is_mobile {
-            // CV above 0.5 is natural mobile jitter — widen threshold.
-            // Cap at 2.0× (threshold can at most double from 50% to 100%).
             let jitter_excess = (cv - 0.5).max(0.0);
             1.0 + jitter_excess.min(1.0)
         } else {
@@ -468,79 +440,21 @@ pub(crate) fn build_profile(entity_id: EntityId, accum: EntityAccum) -> EntityPr
             burst_count: 0,
             pause_count: 0,
             transport_correction: 1.0,
-            is_mobile: is_mobile_entity,
+            is_mobile,
         }
     };
+    (profile, intervals)
+}
 
-    // Path ops
-    let blame_total = accum.path_ops.get(&PathOp::Blame).copied().unwrap_or(0);
-    let blame_pct = if accum.total > 0 {
-        (blame_total as f64 / accum.total as f64 * 1000.0).round() / 10.0
-    } else {
-        0.0
-    };
+/// Detect sub-systems within a fleet entity.
+fn detect_sub_systems(accum: &EntityAccum, top_chrome: u16, chrome_lag: u16, blame_pct: f64) -> Vec<SubSystem> {
+    let mut out = Vec::new();
 
-    let path_ops: BTreeMap<String, u64> = accum.path_ops.iter()
-        .map(|(op, &count)| (format!("{}", op.label()), count))
-        .collect();
-
-    // Repos
-    let mut repo_vec: Vec<(String, u64)> = accum.repos.into_iter().collect();
-    repo_vec.sort_by(|a, b| b.1.cmp(&a.1));
-    let has_real = repo_vec.iter().any(|(r, _)| is_real_repo(r));
-    let has_scatter = repo_vec.iter().any(|(r, _)| !is_real_repo(r));
-
-    // IP rotation — keyed by ip hash (no raw IPs)
-    let ip_req_counts: Vec<u64> = {
-        let mut counts: HashMap<u64, u64> = HashMap::new();
-        for (ip_hash, repos) in &accum.ip_repos {
-            let total: u64 = repos.values().sum();
-            *counts.entry(*ip_hash).or_insert(0) += total;
-        }
-        let mut v: Vec<u64> = counts.values().copied().collect();
-        v.sort();
-        v
-    };
-    let single_req_ips = ip_req_counts.iter().filter(|&&c| c <= 1).count();
-    let single_pct = if !ip_req_counts.is_empty() {
-        single_req_ips as f64 / ip_req_counts.len() as f64 * 100.0
-    } else {
-        0.0
-    };
-    let max_per_ip = ip_req_counts.last().copied().unwrap_or(0);
-    let median_per_ip = if !ip_req_counts.is_empty() {
-        ip_req_counts[ip_req_counts.len() / 2] as f64
-    } else {
-        0.0
-    };
-
-    // Check for IP specialization (any IP >50% on one repo?)
-    let all_generalists = accum.ip_repos.values().all(|repos| {
-        let total: u64 = repos.values().sum();
-        if total < 5 { return true; }
-        let max_repo: u64 = repos.values().copied().max().unwrap_or(0);
-        (max_repo as f64 / total as f64) <= 0.5
-    });
-
-    let strategy = if accum.ip_hashes.len() == 1 {
-        "single-IP (no rotation)".to_string()
-    } else if single_pct > 80.0 {
-        "heavy rotation (>80% single-request IPs)".to_string()
-    } else if all_generalists {
-        format!("{} generalist IPs", accum.ip_hashes.len())
-    } else {
-        format!("{} IPs with some specialization", accum.ip_hashes.len())
-    };
-
-    // Sub-systems detection
-    let mut sub_systems = Vec::new();
-
-    // Chrome version spread → deployment cadence
     if accum.chrome_versions.len() > 1 {
         let versions: Vec<String> = accum.chrome_versions.iter()
             .map(|(v, c)| format!("Chrome/{}: {}", v, c))
             .collect();
-        sub_systems.push(SubSystem {
+        out.push(SubSystem {
             name: "Chrome Deployment Pipeline".to_string(),
             description: format!(
                 "Primary: Chrome/{} ({} versions behind stable {}). {} version variants detected.",
@@ -550,12 +464,11 @@ pub(crate) fn build_profile(entity_id: EntityId, accum: EntityAccum) -> EntityPr
         });
     }
 
-    // UA OS rotation → impersonation pool
     if accum.ua_os.len() >= 2 {
         let os_evidence: Vec<String> = accum.ua_os.iter()
             .map(|(os, c)| format!("{}: {}", os, c))
             .collect();
-        sub_systems.push(SubSystem {
+        out.push(SubSystem {
             name: "OS Impersonation Pool".to_string(),
             description: format!(
                 "{} OS variants from {} IPs with {} unique UA strings. \
@@ -566,25 +479,22 @@ pub(crate) fn build_profile(entity_id: EntityId, accum: EntityAccum) -> EntityPr
         });
     }
 
-    // Blame operation → author attribution team
     if blame_pct > 5.0 {
-        sub_systems.push(SubSystem {
+        let blame_total = accum.path_ops.get(&PathOp::Blame).copied().unwrap_or(0);
+        out.push(SubSystem {
             name: "Author Attribution System".to_string(),
             description: format!(
                 "{:.1}% of requests are /blame/ operations — tracking who wrote each line of code. \
                  This is not source collection; this is authorship mapping.",
                 blame_pct
             ),
-            evidence: vec![
-                format!("{} blame requests out of {} total", blame_total, accum.total),
-            ],
+            evidence: vec![format!("{} blame requests out of {} total", blame_total, accum.total)],
         });
     }
 
-    // Accept-Encoding monoculture → shared config
     if accum.accept_enc.len() == 1 && accum.total > 10 {
         let enc = accum.accept_enc.iter().next().cloned().unwrap_or_default();
-        sub_systems.push(SubSystem {
+        out.push(SubSystem {
             name: "Shared Configuration".to_string(),
             description: format!(
                 "All {} requests share identical Accept-Encoding: '{}'. \
@@ -598,211 +508,154 @@ pub(crate) fn build_profile(entity_id: EntityId, accum: EntityAccum) -> EntityPr
             ],
         });
     }
+    out
+}
 
-    // ── Wave 166f+167: Seven conserved epitopes ──
-    //
-    // Wave 171: vitality reflection — the mirror at the mobility edge.
-    // Entities near the threshold get high vitality; entities far away
-    // (in either direction) get vitality ≈ 0.  Uncertainty is life.
-    let mut epitope_count = 0u32;
-    let mut epitope_triggered = 0u32;
-    let mut vitality_sum = 0.0_f64;
+/// Evaluate a single epitope. Vitality peaks at the threshold boundary.
+fn eval_epitope(score: f64, threshold: f64, above_triggers: bool, description: String) -> EpitopeResult {
+    let triggered = if above_triggers { score > threshold } else { score < threshold };
+    let v = (1.0 - (score - threshold).abs() / threshold).max(0.0);
+    EpitopeResult {
+        score: (score * 10.0).round() / 10.0,
+        triggered,
+        vitality: (v * 1000.0).round() / 1000.0,
+        description,
+    }
+}
+
+/// Score all seven conserved epitopes and compute fleet confidence.
+fn score_epitopes(accum: &EntityAccum, intervals: &[f64], timing: &TimingProfile) -> (EpitopeScores, f64, f64) {
+    let mut count = 0u32;
+    let mut fired = 0u32;
+    let mut vit_sum = 0.0_f64;
+    let mut tally = |r: &EpitopeResult| {
+        count += 1;
+        if r.triggered { fired += 1; }
+        vit_sum += r.vitality;
+    };
 
     let sec_fetch_monotone = if !accum.sec_fetch_triplets.is_empty() && accum.total > 10 {
-        let top_count = accum.sec_fetch_triplets.values().max().copied().unwrap_or(0);
-        let pct = top_count as f64 / accum.total as f64 * 100.0;
-        let threshold = 95.0_f64;
-        let triggered = pct > threshold;
-        epitope_count += 1;
-        if triggered { epitope_triggered += 1; }
-        // Vitality: distance from threshold, normalized.  Peak at pct == threshold.
-        let v = (1.0 - (pct - threshold).abs() / threshold).max(0.0);
-        vitality_sum += v;
-        Some(EpitopeResult {
-            score: (pct * 10.0).round() / 10.0,
-            triggered,
-            vitality: (v * 1000.0).round() / 1000.0,
-            description: format!("Same Sec-Fetch triplet on {:.1}% of requests", pct),
-        })
+        let top = accum.sec_fetch_triplets.values().max().copied().unwrap_or(0);
+        let pct = top as f64 / accum.total as f64 * 100.0;
+        let r = eval_epitope(pct, 95.0, true,
+            format!("Same Sec-Fetch triplet on {:.1}% of requests", pct));
+        tally(&r); Some(r)
     } else { None };
 
     let reading_deficit = if intervals.len() > 10 {
         let pauses = intervals.iter().filter(|&&i| i > 8.0).count();
         let pct = pauses as f64 / intervals.len() as f64 * 100.0;
-        let threshold = 10.0_f64;
-        let triggered = pct < threshold;
-        epitope_count += 1;
-        if triggered { epitope_triggered += 1; }
-        // Vitality: peaks when pct ≈ threshold.  At 9.6% → v ≈ 0.96. At 0.1% → v ≈ 0.01.
-        let v = (1.0 - (pct - threshold).abs() / threshold).max(0.0);
-        vitality_sum += v;
-        Some(EpitopeResult {
-            score: (pct * 10.0).round() / 10.0,
-            triggered,
-            vitality: (v * 1000.0).round() / 1000.0,
-            description: format!("Only {:.1}% of intervals >8s (reading pauses)", pct),
-        })
+        let r = eval_epitope(pct, 10.0, false,
+            format!("Only {:.1}% of intervals >8s (reading pauses)", pct));
+        tally(&r); Some(r)
     } else { None };
 
     let ua_pool_poverty = if accum.total > 50 {
         let pool = accum.uas.len();
         let threshold = std::cmp::max(10, (accum.total as f64 * 0.05) as usize);
-        let triggered = pool < threshold;
-        epitope_count += 1;
-        if triggered { epitope_triggered += 1; }
-        // Vitality: pool near threshold = uncertain = alive
-        let v = (1.0 - (pool as f64 - threshold as f64).abs() / threshold as f64).max(0.0);
-        vitality_sum += v;
-        Some(EpitopeResult {
-            score: pool as f64,
-            triggered,
-            vitality: (v * 1000.0).round() / 1000.0,
-            description: format!("{} unique UAs for {} visits", pool, accum.total),
-        })
+        let r = eval_epitope(pool as f64, threshold as f64, false,
+            format!("{} unique UAs for {} visits", pool, accum.total));
+        tally(&r); Some(r)
     } else { None };
 
     let session_absent = if accum.total > 20 {
         let pct = accum.cookie_present as f64 / accum.total as f64 * 100.0;
-        let threshold = 5.0_f64;
-        let triggered = pct < threshold;
-        epitope_count += 1;
-        if triggered { epitope_triggered += 1; }
-        let v = (1.0 - (pct - threshold).abs() / threshold).max(0.0);
-        vitality_sum += v;
-        Some(EpitopeResult {
-            score: (pct * 10.0).round() / 10.0,
-            triggered,
-            vitality: (v * 1000.0).round() / 1000.0,
-            description: format!("Cookies on {:.1}% of requests", pct),
-        })
+        let r = eval_epitope(pct, 5.0, false,
+            format!("Cookies on {:.1}% of requests", pct));
+        tally(&r); Some(r)
     } else { None };
 
     let referer_self_loop = if accum.total > 20 {
         let pct = accum.referer_external as f64 / accum.total as f64 * 100.0;
-        let threshold = 2.0_f64;
-        let triggered = pct < threshold;
-        epitope_count += 1;
-        if triggered { epitope_triggered += 1; }
-        let v = (1.0 - (pct - threshold).abs() / threshold).max(0.0);
-        vitality_sum += v;
-        Some(EpitopeResult {
-            score: (pct * 10.0).round() / 10.0,
-            triggered,
-            vitality: (v * 1000.0).round() / 1000.0,
-            description: format!("External referers on {:.1}% of requests", pct),
-        })
+        let r = eval_epitope(pct, 2.0, false,
+            format!("External referers on {:.1}% of requests", pct));
+        tally(&r); Some(r)
     } else { None };
 
-    let burst_ratio_epitope = if intervals.len() > 10 {
+    let burst_ratio = if intervals.len() > 10 {
         let bursts = intervals.iter().filter(|&&i| i < 3.0).count();
         let pct = bursts as f64 / intervals.len() as f64 * 100.0;
-        // Transport channel correction (Paper 76): mobile connections have
-        // natural jitter from cell tower handoffs that inflates burst count.
-        // The correction widens the threshold so mobile humans aren't
-        // penalized for their transport channel being a membrane.
-        let threshold = 50.0_f64 * timing.transport_correction;
-        let triggered = pct > threshold;
-        epitope_count += 1;
-        if triggered { epitope_triggered += 1; }
-        let v = (1.0 - (pct - threshold).abs() / threshold).max(0.0);
-        vitality_sum += v;
+        let threshold = 50.0 * timing.transport_correction;
         let desc = if timing.transport_correction > 1.001 {
-            format!(
-                "{:.1}% of intervals <3s (threshold={:.0}%, mobile transport correction={:.2}×)",
-                pct, threshold, timing.transport_correction
-            )
+            format!("{:.1}% of intervals <3s (threshold={:.0}%, mobile transport correction={:.2}×)",
+                pct, threshold, timing.transport_correction)
         } else {
             format!("{:.1}% of intervals <3s", pct)
         };
-        Some(EpitopeResult {
-            score: (pct * 10.0).round() / 10.0,
-            triggered,
-            vitality: (v * 1000.0).round() / 1000.0,
-            description: desc,
-        })
+        let r = eval_epitope(pct, threshold, true, desc);
+        tally(&r); Some(r)
     } else { None };
 
-    // Wave 167: referer_absence — conserved ghost army epitope.
-    // Among Sec-Fetch-bearing requests, what fraction have NO referer?
-    // Residential proxy exits are programmatic → no referer chain.
-    // Real humans arrive via search/links → they HAVE referers.
-    // Faking referrer chains creates detectable patterns.
-    let referer_absence_epitope = if accum.sec_fetch_present > 20 {
-        // Only count referer absence among sec-fetch-bearing requests
-        // (non-sec-fetch requests are already classified as stealth/unknown)
-        let sec_fetch_total = accum.sec_fetch_present;
-        let absent_pct = accum.referer_absent as f64 / sec_fetch_total as f64 * 100.0;
-        let threshold = 95.0_f64;
-        let triggered = absent_pct > threshold;
-        epitope_count += 1;
-        if triggered { epitope_triggered += 1; }
-        let v = (1.0 - (absent_pct - threshold).abs() / threshold).max(0.0);
-        vitality_sum += v;
-        Some(EpitopeResult {
-            score: (absent_pct * 10.0).round() / 10.0,
-            triggered,
-            vitality: (v * 1000.0).round() / 1000.0,
-            description: format!(
-                "{:.1}% of Sec-Fetch requests have no referer ({} absent / {} with sec-fetch)",
-                absent_pct, accum.referer_absent, sec_fetch_total
-            ),
-        })
+    let referer_absence = if accum.sec_fetch_present > 20 {
+        let total = accum.sec_fetch_present;
+        let pct = accum.referer_absent as f64 / total as f64 * 100.0;
+        let r = eval_epitope(pct, 95.0, true,
+            format!("{:.1}% of Sec-Fetch requests have no referer ({} absent / {} with sec-fetch)",
+                pct, accum.referer_absent, total));
+        tally(&r); Some(r)
     } else { None };
 
-    // Fleet confidence with vitality reflection (Wave 171).
-    //
-    // The raw score is triggered/total (how many epitopes fired).
-    // The vitality mean measures how close the entity sits to the
-    // threshold boundaries — the mobility edge.
-    //
-    // But vitality only matters when there IS genuine uncertainty —
-    // when the entity has a MIX of triggered and not-triggered epitopes.
-    // An entity at 7/7 is certain-dead regardless of individual proximity.
-    // An entity at 0/7 is certain-alive.  The uncertain band is in between.
-    //
-    // We weight vitality by the binary entropy of the trigger ratio:
-    //   H(p) = -p·log₂(p) - (1-p)·log₂(1-p)
-    // which peaks at p=0.5 (maximum uncertainty) and vanishes at p=0 and p=1.
-    //
-    //   Ghost  (7/7, H=0)       → vitality suppressed → fleet ≈ 100%
-    //   human  (4/7, H≈0.99)    → vitality amplified  → fleet drops
-    //   clean  (0/7, H=0)       → vitality suppressed → fleet ≈ 0%
-    let vitality_mean = if epitope_count > 0 {
-        vitality_sum / epitope_count as f64
-    } else {
-        0.0
-    };
-    let fleet_raw = if epitope_count > 0 {
-        epitope_triggered as f64 / epitope_count as f64 * 100.0
-    } else {
-        0.0
-    };
-    // Binary entropy of trigger ratio — peaks at 50/50 mix
-    let p = if epitope_count > 0 {
-        epitope_triggered as f64 / epitope_count as f64
-    } else {
-        0.0
-    };
+    // Fleet confidence with vitality × entropy gating (Wave 171)
+    let vit_mean = if count > 0 { vit_sum / count as f64 } else { 0.0 };
+    let fleet_raw = if count > 0 { fired as f64 / count as f64 * 100.0 } else { 0.0 };
+    let p = if count > 0 { fired as f64 / count as f64 } else { 0.0 };
     let entropy = if p > 0.0 && p < 1.0 {
         -(p * p.log2() + (1.0 - p) * (1.0 - p).log2())
-    } else {
-        0.0 // all-triggered or none-triggered → no uncertainty → no vitality
-    };
-    // Effective vitality: raw vitality gated by entropy of the trigger mix
-    let effective_vitality = vitality_mean * entropy;
-    let fleet_confidence = (fleet_raw * (1.0 - effective_vitality) * 10.0).round() / 10.0;
+    } else { 0.0 };
+    let eff_vit = vit_mean * entropy;
+    let fleet_confidence = (fleet_raw * (1.0 - eff_vit) * 10.0).round() / 10.0;
 
-    // ── Wave 171: Negentropy — defensive information from vuln probes ──
-    //
-    // Vulnerability scanners, path traversal probers, and .env hunters are
-    // free pen testers.  Each unique probe path teaches the organism something
-    // about its attack surface.  Negentropy = information they provide TO us.
-    //
-    // Negentropy score = log₂(unique_vuln_paths + 1) × coverage_ratio
-    // where coverage_ratio = vuln_probes / total_requests.
-    //
-    // A scanner that probes 50 unique .env paths across 3000 requests has high
-    // negentropy.  A fleet that hits the same /commit/ path 800K times has zero.
+    (EpitopeScores { sec_fetch_monotone, reading_deficit, ua_pool_poverty,
+        session_absent, referer_self_loop, burst_ratio, referer_absence },
+     fleet_confidence, eff_vit)
+}
+
+/// Compute IP rotation pattern from accumulated IP data.
+fn compute_ip_rotation(accum: &EntityAccum) -> IpRotation {
+    let ip_req_counts: Vec<u64> = {
+        let mut counts: HashMap<u64, u64> = HashMap::new();
+        for (ip_hash, repos) in &accum.ip_repos {
+            let total: u64 = repos.values().sum();
+            *counts.entry(*ip_hash).or_insert(0) += total;
+        }
+        let mut v: Vec<u64> = counts.values().copied().collect();
+        v.sort();
+        v
+    };
+    let single_req_ips = ip_req_counts.iter().filter(|&&c| c <= 1).count();
+    let single_pct = if !ip_req_counts.is_empty() {
+        single_req_ips as f64 / ip_req_counts.len() as f64 * 100.0
+    } else { 0.0 };
+    let max_per_ip = ip_req_counts.last().copied().unwrap_or(0);
+    let median_per_ip = if !ip_req_counts.is_empty() {
+        ip_req_counts[ip_req_counts.len() / 2] as f64
+    } else { 0.0 };
+    let all_generalists = accum.ip_repos.values().all(|repos| {
+        let total: u64 = repos.values().sum();
+        if total < 5 { return true; }
+        let max_repo: u64 = repos.values().copied().max().unwrap_or(0);
+        (max_repo as f64 / total as f64) <= 0.5
+    });
+    let strategy = if accum.ip_hashes.len() == 1 {
+        "single-IP (no rotation)".to_string()
+    } else if single_pct > 80.0 {
+        "heavy rotation (>80% single-request IPs)".to_string()
+    } else if all_generalists {
+        format!("{} generalist IPs", accum.ip_hashes.len())
+    } else {
+        format!("{} IPs with some specialization", accum.ip_hashes.len())
+    };
+    IpRotation {
+        strategy,
+        single_request_ips_pct: (single_pct * 10.0).round() / 10.0,
+        max_per_ip,
+        median_per_ip,
+        all_generalists,
+    }
+}
+
+/// Scan repos for vulnerability probe paths and compute negentropy.
+fn compute_negentropy(repos: &[(String, u64)], total: u64) -> (f64, Vec<String>) {
     const VULN_MARKERS: &[&str] = &[
         ".env", ".git/", ".git-", ".aws/", ".docker/",
         "wp-admin", "wp-login", "wp-includes", "wp-content",
@@ -811,7 +664,7 @@ pub(crate) fn build_profile(entity_id: EntityId, accum: EntityAccum) -> EntityPr
         "xmlrpc", "shell", "cgi-bin", "eval-stdin",
         "%2e%2e", "../", "etc/passwd", "proc/self",
     ];
-    let vuln_paths: Vec<String> = repo_vec.iter()
+    let vuln_paths: Vec<String> = repos.iter()
         .filter(|(path, _)| {
             let lp = path.to_lowercase();
             VULN_MARKERS.iter().any(|m| lp.contains(m))
@@ -819,16 +672,49 @@ pub(crate) fn build_profile(entity_id: EntityId, accum: EntityAccum) -> EntityPr
         .map(|(path, _)| path.clone())
         .take(30)
         .collect();
-    let vuln_count = vuln_paths.len();
-    let negentropy_score = if vuln_count > 0 {
-        let diversity = ((vuln_count + 1) as f64).log2();
-        let coverage = vuln_count as f64 / accum.total.max(1) as f64;
-        // Scale: log₂(paths) × coverage × 100, capped at 100
+    let n = vuln_paths.len();
+    let score = if n > 0 {
+        let diversity = ((n + 1) as f64).log2();
+        let coverage = n as f64 / total.max(1) as f64;
         (diversity * coverage * 100.0 * 100.0).min(100.0)
-    } else {
-        0.0
-    };
-    let negentropy_score = (negentropy_score * 100.0).round() / 100.0;
+    } else { 0.0 };
+    ((score * 100.0).round() / 100.0, vuln_paths)
+}
+
+// ── Profile builder ──
+
+pub(crate) fn build_profile(entity_id: EntityId, accum: EntityAccum) -> EntityProfile {
+    let duration_secs = if accum.last_ts > accum.first_ts {
+        accum.last_ts - accum.first_ts
+    } else { 0.0 };
+    let duration_hours = duration_secs / 3600.0;
+    let avg_rps = if duration_secs > 0.0 { accum.total as f64 / duration_secs } else { 0.0 };
+
+    let top_chrome: u16 = accum.chrome_versions.iter()
+        .max_by_key(|(_, c)| *c).map(|(v, _)| *v).unwrap_or(0);
+    let chrome_lag = if top_chrome > 0 { CHROME_CURRENT_STABLE.saturating_sub(top_chrome) } else { 0 };
+
+    let is_mobile = matches!(accum.platform(), "iPhone" | "Android");
+    let (timing, intervals) = compute_timing(accum.timestamps.clone(), is_mobile);
+
+    let blame_total = accum.path_ops.get(&PathOp::Blame).copied().unwrap_or(0);
+    let blame_pct = if accum.total > 0 {
+        (blame_total as f64 / accum.total as f64 * 1000.0).round() / 10.0
+    } else { 0.0 };
+    let path_ops: BTreeMap<String, u64> = accum.path_ops.iter()
+        .map(|(op, &count)| (format!("{}", op.label()), count))
+        .collect();
+
+    let mut repo_vec: Vec<(String, u64)> = accum.repos.clone().into_iter().collect();
+    repo_vec.sort_by(|a, b| b.1.cmp(&a.1));
+    let has_real = repo_vec.iter().any(|(r, _)| is_real_repo(r));
+    let has_scatter = repo_vec.iter().any(|(r, _)| !is_real_repo(r));
+
+    let ip_rotation = compute_ip_rotation(&accum);
+    let sub_systems = detect_sub_systems(&accum, top_chrome, chrome_lag, blame_pct);
+    let (epitopes, fleet_confidence, effective_vitality) =
+        score_epitopes(&accum, &intervals, &timing);
+    let (negentropy, vuln_probes) = compute_negentropy(&repo_vec, accum.total);
 
     EntityProfile {
         label: entity_id.label().to_string(),
@@ -860,33 +746,19 @@ pub(crate) fn build_profile(entity_id: EntityId, accum: EntityAccum) -> EntityPr
         chrome_lag,
         ua_os_distribution: accum.ua_os.into_iter().collect(),
         ua_pool_size: accum.uas.len(),
-        ip_rotation: IpRotation {
-            strategy,
-            single_request_ips_pct: (single_pct * 10.0).round() / 10.0,
-            max_per_ip,
-            median_per_ip,
-            all_generalists,
-        },
+        ip_rotation,
         path_ops,
         blame_pct,
-        top_repos: repo_vec.clone().into_iter().take(20).collect(),
+        top_repos: repo_vec.into_iter().take(20).collect(),
         targets_real_only: has_real && !has_scatter,
         targets_scatter_only: !has_real && has_scatter,
         timing,
         sub_systems,
-        epitopes: EpitopeScores {
-            sec_fetch_monotone,
-            reading_deficit,
-            ua_pool_poverty,
-            session_absent,
-            referer_self_loop,
-            burst_ratio: burst_ratio_epitope,
-            referer_absence: referer_absence_epitope,
-        },
+        epitopes,
         fleet_confidence,
         vitality: (effective_vitality * 1000.0).round() / 1000.0,
-        negentropy: negentropy_score,
-        vuln_probes: vuln_paths,
+        negentropy,
+        vuln_probes,
         hosts: accum.hosts.into_iter().collect(),
     }
 }
