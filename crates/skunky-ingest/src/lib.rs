@@ -18,6 +18,7 @@ pub mod epitope_conservation;
 pub mod epitope_sensitivity;
 pub mod cube_oracle;
 pub mod dashboard_profile;
+pub mod dashboard_analysis;
 pub mod dashboard_writer;
 pub mod cursor;
 pub mod entity_classifier;
