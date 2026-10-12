@@ -380,12 +380,22 @@ impl TopologyWriter {
         let mut evaluated = [0usize; 6];
         for entity in &result.entities {
             for i in 0..6 {
-                let bit = (entity.flipped_mask >> i) & 1;
-                if bit == 1 { flipped[i] += 1; }
-                evaluated[i] += 1;
+                // Only count as evaluated if both t0 and t1 had a real value
+                // (0x01 or 0x02, not 0x00 = unevaluated)
+                let t0_eval = entity.sort_key_t0[i] != 0x00;
+                let t1_eval = entity.sort_key_t1[i] != 0x00;
+                if t0_eval && t1_eval {
+                    evaluated[i] += 1;
+                    let bit = (entity.flipped_mask >> i) & 1;
+                    if bit == 1 { flipped[i] += 1; }
+                }
             }
         }
-        Some(crate::sort_compression::EpitopeFlipData { flipped, evaluated })
+        Some(crate::sort_compression::EpitopeFlipData {
+            flipped,
+            evaluated,
+            matched: result.matched_entities,
+        })
     }
 
     /// Force a topology snapshot and write to disk.

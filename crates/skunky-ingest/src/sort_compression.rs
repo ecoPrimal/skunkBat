@@ -328,6 +328,9 @@ pub struct EpitopeFlipData {
     pub flipped: [usize; 6],
     /// For each of the 6 epitopes: how many entities were evaluated at both flushes.
     pub evaluated: [usize; 6],
+    /// Total entities matched between the two conservation snapshots.
+    /// Used as denominator for eval_rate instead of total IP population.
+    pub matched: usize,
 }
 
 impl NullDimension {
@@ -382,8 +385,9 @@ impl NullDimension {
         let mut vdj_map = [VdjRole::J; 6]; // default: conserved
 
         if let Some(fd) = flip_data {
+            let match_f = fd.matched.max(1) as f64;
             for i in 0..6 {
-                let eval_rate = fd.evaluated[i] as f64 / pop_f;
+                let eval_rate = fd.evaluated[i] as f64 / match_f;
                 if eval_rate < 0.2 {
                     vdj_map[i] = VdjRole::D; // not enough data → diversity
                 } else {
@@ -522,7 +526,8 @@ impl NullDimension {
                 let spin = if flip_rate < 0.1 { 0 } else if flip_rate < 0.4 { 1 } else { 2 };
 
                 // Mass: evaluation depth → 3 bands
-                let eval_rate = fd.evaluated[i] as f64 / pop_f;
+                let iso_match_f = fd.matched.max(1) as f64;
+                let eval_rate = fd.evaluated[i] as f64 / iso_match_f;
                 let mass = if eval_rate < 0.3 { 0 } else if eval_rate < 0.7 { 1 } else { 2 };
 
                 // Charge: how far from the mean flip rate (correlation with the ensemble)
@@ -737,6 +742,7 @@ mod tests {
         let flip = EpitopeFlipData {
             flipped:   [80, 5, 0, 60, 2, 3],    // burst & sec_fetch flip a lot
             evaluated: [100, 100, 10, 100, 100, 100], // ua_pool barely evaluated
+            matched: 100,
         };
         let nd = NullDimension::compute((100, 100, 100), 100, Some(&flip));
         assert_eq!(nd.vdj_map[0], VdjRole::V, "burst flips 80% → V");
@@ -820,6 +826,7 @@ mod tests {
         let flip = EpitopeFlipData {
             flipped:   [80, 5, 60, 0, 2, 3],     // 2 flip (V), 1 unevaluated (D), 3 stable (J)
             evaluated: [100, 100, 100, 10, 100, 100],
+            matched: 100,
         };
         let nd = NullDimension::compute((100, 100, 100), 100, Some(&flip));
         // V=2 (burst, ua_pool), D=1 (sec_fetch), J=3 → V+D=3
@@ -891,6 +898,7 @@ mod tests {
         let flip = EpitopeFlipData {
             flipped:   [80, 5, 0, 60, 2, 3],
             evaluated: [100, 100, 10, 100, 100, 100],
+            matched: 100,
         };
         let nd = NullDimension::compute((100, 100, 100), 100, Some(&flip));
         // burst flips 80% → spin=2 (volatile)
@@ -910,6 +918,7 @@ mod tests {
         let flip = EpitopeFlipData {
             flipped:   [80, 80, 80, 80, 80, 80], // all V, no D or J
             evaluated: [100, 100, 100, 100, 100, 100],
+            matched: 100,
         };
         let nd = NullDimension::compute((100, 100, 100), 100, Some(&flip));
         // All 6 are V → VDJ has only 1 role → d stays at 2
