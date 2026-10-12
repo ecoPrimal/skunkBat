@@ -718,6 +718,18 @@ impl DashboardWriter {
             "gordian_proof": "J(self) = \u{2211}others(V+D) / \u{03c0}",
             "tempo": r6(null_dim.tempo),
             "t_equals_pi": "t = \u{03c0}",
+            // V, D, J as individual π-bodies
+            "v_pi": r6(null_dim.v_pi),
+            "d_pi": r6(null_dim.d_pi),
+            "j_pi": r6(null_dim.j_pi),
+            "vdj_product": r6(null_dim.vdj_product),
+            "vdj_product_error": r6(null_dim.vdj_product_error),
+            "vdj_budget": format!(
+                "V({:.2})\u{00d7}D({:.2})\u{00d7}J({:.2}) = {:.3} (\u{03c0}\u{00b3}\u{2248}31, \u{230a}\u{03c0}\u{00b3}\u{230b}={})",
+                null_dim.v_pi, null_dim.d_pi, null_dim.j_pi,
+                null_dim.vdj_product,
+                (std::f64::consts::PI.powi(3)).floor() as usize,
+            ),
             "isotope_classes": null_dim.isotope_classes.iter().enumerate().map(|(i, (s, m, c))| {
                 serde_json::json!({
                     "epitope": crate::sort_compression::EPITOPE_NAMES[i],

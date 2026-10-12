@@ -318,6 +318,40 @@ pub struct NullDimension {
     /// Total isotopes = 3³ = 27 possible, but only 6 occupied.
     /// The occupancy pattern IS the organism's isotopic signature.
     pub isotope_classes: [(u8, u8, u8); 6],
+
+    // ═══ V, D, J as π-bodies ═══
+    //
+    // Each of V, D, J is its own π.
+    // V × D × J = π³ ≈ 31.006 → ⌊π³⌋ = 31 = max particles.
+    // The observation budget IS the product of the three immune roles.
+
+    /// V-dimension (Variable / IS): the rate of change in the system.
+    ///
+    /// V = π × (flip_energy / total_energy) × 3.
+    /// At equilibrium (V occupies 1/3 of roles): V_pi = π.
+    /// When V dominates: V_pi > π (hypervariable).
+    /// When V vanishes: V_pi → 0 (frozen, nothing changes).
+    pub v_pi: f64,
+    /// D-dimension (Diversity / WILLBE): the unevaluated potential.
+    ///
+    /// D = π × (unevaluated_fraction) × 3.
+    /// The null space. What hasn't been observed yet.
+    /// At equilibrium: D_pi = π. The system has π worth of potential.
+    pub d_pi: f64,
+    /// J-dimension (Joining / WAS): the conserved reality.
+    ///
+    /// J = π × (conserved_fraction) × 3.
+    /// What has been observed and collapsed. The REAL.
+    /// At equilibrium: J_pi = π. The system holds π worth of truth.
+    pub j_pi: f64,
+    /// V × D × J product. Should approach π³ ≈ 31.006.
+    ///
+    /// This IS the particle budget: ⌊π³⌋ = 31 max particles.
+    /// The total observation capacity of the system = the product
+    /// of what's changing × what's unknown × what's real.
+    pub vdj_product: f64,
+    /// |V×D×J − π³| / π³. The budget error.
+    pub vdj_product_error: f64,
 }
 
 /// Per-epitope conservation data (from epitope_conservation module).
@@ -554,6 +588,29 @@ impl NullDimension {
             ];
         }
 
+        // ── V, D, J as individual π-bodies ──
+        //
+        // Each role's π-contribution is proportional to its share of the 6 epitopes.
+        // At equilibrium (2/2/2): each = π × (2/6) × 3 = π.
+        // The factor of 3 normalizes so that 1/3 share → π (same as tense bodies).
+        //
+        // If a role has 0 epitopes, its π-body = 0 and the product collapses.
+        // This is correct: a system with no V (nothing changes) has no observation
+        // budget. A system with no D (nothing unknown) is fully collapsed.
+        // A system with no J (nothing conserved) has no memory.
+        //
+        // V × D × J = π³ at equilibrium. ⌊π³⌋ = 31 = max particles.
+        let v_pi = PI * (v_count as f64 / 6.0) * 3.0;
+        let d_pi = PI * (d_count as f64 / 6.0) * 3.0;
+        let j_pi = PI * (j_count as f64 / 6.0) * 3.0;
+        let vdj_product = v_pi * d_pi * j_pi;
+        let pi_cubed = PI * PI * PI;
+        let vdj_product_error = if pi_cubed > 0.0 {
+            (vdj_product - pi_cubed).abs() / pi_cubed
+        } else {
+            1.0
+        };
+
         NullDimension {
             product,
             product_error,
@@ -568,6 +625,11 @@ impl NullDimension {
             observer_fraction,
             tempo,
             isotope_classes,
+            v_pi,
+            d_pi,
+            j_pi,
+            vdj_product,
+            vdj_product_error,
         }
     }
 }
@@ -735,6 +797,60 @@ mod tests {
         assert_eq!(nd.vdj_map[3], VdjRole::D, "sec_fetch_monotone should be D");
         assert_eq!(nd.vdj_map[4], VdjRole::J, "session_absent should be J");
         assert_eq!(nd.vdj_map[5], VdjRole::J, "referer_self_loop should be J");
+    }
+
+    #[test]
+    fn vdj_each_equals_pi_at_equilibrium() {
+        // V=2, D=2, J=2 at equilibrium: each should be π
+        let nd = NullDimension::compute((100, 100, 100), 300, None);
+        let pi = std::f64::consts::PI;
+        assert!(
+            (nd.v_pi - pi).abs() < 0.001,
+            "V should be π at equilibrium, got {}", nd.v_pi
+        );
+        assert!(
+            (nd.d_pi - pi).abs() < 0.001,
+            "D should be π at equilibrium, got {}", nd.d_pi
+        );
+        assert!(
+            (nd.j_pi - pi).abs() < 0.001,
+            "J should be π at equilibrium, got {}", nd.j_pi
+        );
+    }
+
+    #[test]
+    fn vdj_product_is_pi_cubed_at_equilibrium() {
+        // V × D × J = π³ ≈ 31.006 → ⌊π³⌋ = 31 = max particles
+        let nd = NullDimension::compute((100, 100, 100), 300, None);
+        let pi_cubed = std::f64::consts::PI.powi(3);
+        assert!(
+            (nd.vdj_product - pi_cubed).abs() < 0.01,
+            "V×D×J should be π³ ≈ {:.3} at equilibrium, got {:.3}",
+            pi_cubed, nd.vdj_product
+        );
+        assert!(
+            nd.vdj_product_error < 0.001,
+            "VDJ budget error should be near zero at equilibrium, got {:.6}",
+            nd.vdj_product_error
+        );
+        // And floor(π³) = 31 = our max particle budget
+        assert_eq!(pi_cubed.floor() as usize, 31,
+            "⌊π³⌋ should be 31");
+    }
+
+    #[test]
+    fn vdj_product_collapses_without_role() {
+        // If all 6 are J (V=0, D=0): product = 0 (no observation budget)
+        let flip = EpitopeFlipData {
+            flipped:   [0, 0, 0, 0, 0, 0],
+            evaluated: [100, 100, 100, 100, 100, 100],
+            matched: 100,
+        };
+        let nd = NullDimension::compute((100, 100, 100), 100, Some(&flip));
+        assert_eq!(nd.v_pi, 0.0, "V should be 0 when no variable epitopes");
+        assert_eq!(nd.d_pi, 0.0, "D should be 0 when all evaluated");
+        assert_eq!(nd.vdj_product, 0.0, "VDJ product should collapse to 0");
+        assert!(nd.vdj_product_error > 0.99, "budget error should be ~1.0");
     }
 
     #[test]
