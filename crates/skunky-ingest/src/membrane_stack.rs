@@ -758,6 +758,49 @@ fn layer_deep_space() -> MembraneLayer {
     }
 }
 
+/// Inter-layer coupling and topology classification.
+fn compute_topology(layers: &[MembraneLayer]) -> (Vec<LayerCoupling>, f64, bool, &'static str) {
+    let mut coupling = Vec::with_capacity(layers.len().saturating_sub(1));
+    for pair in layers.windows(2) {
+        let (pa, pb) = (pair[0].permeability, pair[1].permeability);
+        let max_p = pa.max(pb);
+        let strength = if max_p > 1e-15 { pa.min(pb) / max_p } else { 0.0 };
+        coupling.push(LayerCoupling {
+            between: [pair[0].name.clone(), pair[1].name.clone()],
+            strength: (strength * 10000.0).round() / 10000.0,
+            gradient: ((pa - pb).abs() * 10000.0).round() / 10000.0,
+        });
+    }
+    let mean_coupling = if coupling.is_empty() { 0.0 } else {
+        (coupling.iter().map(|c| c.strength).sum::<f64>() / coupling.len() as f64 * 1000.0).round() / 1000.0
+    };
+    let first_p = layers.first().map_or(0.0, |l| l.permeability);
+    let last_p = layers.last().map_or(0.0, |l| l.permeability);
+    let is_wormhole = first_p > 1e-10 && last_p > 1e-10;
+    let topology_class = if is_wormhole { "wormhole" } else { "sphere" };
+    (coupling, mean_coupling, is_wormhole, topology_class)
+}
+
+/// Zero-Knowledge Self: complement of correctly excluded non-self.
+fn compute_zk_proof(layers: &[MembraneLayer], is_wormhole: bool, selectivity: f64, round_trip_p: f64) -> ZkProof {
+    let gaia_data = layers.first().and_then(|l| l.data.as_object());
+    let (non_self, self_res) = if let Some(data) = gaia_data {
+        let total = data.get("requests_per_window").and_then(|v| v.as_f64()).unwrap_or(0.0);
+        let human = data.get("human").and_then(|v| v.as_f64()).unwrap_or(0.0);
+        let ai = data.get("ai_agent").and_then(|v| v.as_f64()).unwrap_or(0.0);
+        let scanner = data.get("scanner").and_then(|v| v.as_f64()).unwrap_or(0.0);
+        if total > 0.0 { ((ai + scanner) / total, human / total) } else { (0.0, 0.0) }
+    } else { (0.0, 0.0) };
+    let symbol = if is_wormhole && selectivity > 0.5 { "∞" } else { "○" };
+    ZkProof {
+        non_self_classified: (non_self * 10000.0).round() / 10000.0,
+        self_residual: (self_res * 10000.0).round() / 10000.0,
+        soundness: (selectivity * 1000.0).round() / 1000.0,
+        ouroboros_residual: format_p(round_trip_p),
+        symbol: symbol.into(),
+    }
+}
+
 // ── Stack computation ──
 
 /// Compute the full 7-layer membrane stack.
@@ -816,72 +859,8 @@ pub async fn compute_stack(config: &MembraneStackConfig) -> MembraneStack {
     // Round-trip: signal traverses every membrane twice (out and back)
     let round_trip_p = one_way_p * one_way_p;
 
-    // Inter-layer coupling: compare adjacent pairs
-    let mut coupling = Vec::with_capacity(layers.len().saturating_sub(1));
-    for pair in layers.windows(2) {
-        let pa = pair[0].permeability;
-        let pb = pair[1].permeability;
-        let max_p = pa.max(pb);
-        let strength = if max_p > 1e-15 {
-            pa.min(pb) / max_p
-        } else {
-            0.0 // both effectively zero
-        };
-        coupling.push(LayerCoupling {
-            between: [pair[0].name.clone(), pair[1].name.clone()],
-            strength: (strength * 10000.0).round() / 10000.0,
-            gradient: ((pa - pb).abs() * 10000.0).round() / 10000.0,
-        });
-    }
-
-    let mean_coupling = if coupling.is_empty() {
-        0.0
-    } else {
-        let sum: f64 = coupling.iter().map(|c| c.strength).sum();
-        (sum / coupling.len() as f64 * 1000.0).round() / 1000.0
-    };
-
-    // Topology class: wormhole if both ends have P > 0 (signal can circulate)
-    let first_p = layers.first().map_or(0.0, |l| l.permeability);
-    let last_p = layers.last().map_or(0.0, |l| l.permeability);
-    let is_wormhole = first_p > 1e-10 && last_p > 1e-10;
-    let topology_class = if is_wormhole { "wormhole" } else { "sphere" };
-
-    // ═══════════════════════════════════════════════════════════════
-    // Zero-Knowledge Proof — Hypothesis 13: The Zero-Knowledge Self
-    // Self = complement of all correctly excluded non-self.
-    // The ouroboros residual is what survives the full round trip.
-    // ═══════════════════════════════════════════════════════════════
-
-    // Extract non-self classification from gAIa layer
-    let gaia_data = layers.first().and_then(|l| l.data.as_object());
-    let (non_self_frac, self_residual_frac) = if let Some(data) = gaia_data {
-        let total = data.get("requests_per_window")
-            .and_then(|v| v.as_f64()).unwrap_or(0.0);
-        let human = data.get("human")
-            .and_then(|v| v.as_f64()).unwrap_or(0.0);
-        let ai = data.get("ai_agent")
-            .and_then(|v| v.as_f64()).unwrap_or(0.0);
-        let scanner = data.get("scanner")
-            .and_then(|v| v.as_f64()).unwrap_or(0.0);
-        if total > 0.0 {
-            ((ai + scanner) / total, human / total)
-        } else {
-            (0.0, 0.0)
-        }
-    } else {
-        (0.0, 0.0)
-    };
-
-    let zk_symbol = if is_wormhole && selectivity > 0.5 { "∞" } else { "○" };
-
-    let zk = ZkProof {
-        non_self_classified: (non_self_frac * 10000.0).round() / 10000.0,
-        self_residual: (self_residual_frac * 10000.0).round() / 10000.0,
-        soundness: (selectivity * 1000.0).round() / 1000.0,
-        ouroboros_residual: format_p(round_trip_p),
-        symbol: zk_symbol.into(),
-    };
+    let (coupling, mean_coupling, is_wormhole, topology_class) = compute_topology(&layers);
+    let zk = compute_zk_proof(&layers, is_wormhole, selectivity, round_trip_p);
 
     let elapsed = start.elapsed().as_secs_f64();
 
