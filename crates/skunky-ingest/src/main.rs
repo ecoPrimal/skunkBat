@@ -535,14 +535,16 @@ async fn run(cli: Cli) -> Result<(), IngestError> {
     // Writes dashboard.json for the signal site from live pipeline data.
     let mut dashboard_writer = if cli.dashboard_writer {
         tracing::info!("📊 dashboard writer active — bloom_live.py convergence");
-        Some(dashboard_writer::DashboardWriter::with_anderson(
+        let mut dw = dashboard_writer::DashboardWriter::with_anderson(
             cli.dashboard_path.clone(),
             cli.dashboard_state_path.clone(),
             cli.dashboard_flush_interval,
             epitope_registry.clone(),
             anderson_profile.clone(),
             cli.squirrel_announce,
-        ))
+        );
+        dw.set_oracle(oracle.clone());
+        Some(dw)
     } else {
         None
     };

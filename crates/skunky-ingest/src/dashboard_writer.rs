@@ -99,6 +99,10 @@ pub struct DashboardWriter {
     /// Latest epitope flip data from topology conservation analysis.
     /// Wired into NullDimension::compute() for VDJ classification.
     epitope_flip: Option<crate::sort_compression::EpitopeFlipData>,
+    /// Shared bingo cube oracle for generation/training summary.
+    oracle: Option<crate::cube_oracle::SharedOracle>,
+    /// Counter of observations fed to the oracle (for dashboard summary).
+    bingo_observations: u64,
 }
 
 impl DashboardWriter {
@@ -134,6 +138,8 @@ impl DashboardWriter {
             anderson_profile,
             squirrel_announce,
             epitope_flip: None,
+            oracle: None,
+            bingo_observations: 0,
         };
         tracing::info!(
             output = %writer.output_path.display(),
@@ -149,6 +155,16 @@ impl DashboardWriter {
     /// Set the latest epitope flip data from topology conservation analysis.
     pub fn set_epitope_flip(&mut self, flip: Option<crate::sort_compression::EpitopeFlipData>) {
         self.epitope_flip = flip;
+    }
+
+    /// Set the shared bingo cube oracle reference for dashboard summary.
+    pub fn set_oracle(&mut self, oracle: crate::cube_oracle::SharedOracle) {
+        self.oracle = Some(oracle);
+    }
+
+    /// Increment bingo observation counter (called per scatter serve).
+    pub fn record_bingo_observation(&mut self) {
+        self.bingo_observations += 1;
     }
 
     fn load_culture(path: &Path) -> DashboardCulture {
@@ -631,7 +647,7 @@ impl DashboardWriter {
         // wired — it requires predict() feeding the dashboard. Count stays 0.
         let tense_is = self.culture.ips.values().filter(|p| p.requests == 1).count();
         let tense_was = self.culture.ips.values().filter(|p| p.requests > 1).count();
-        let tense_willbe: usize = 0; // Nautilus integration point
+        let tense_willbe: usize = nautilus_predict(&self.culture);
         let tense_distribution = serde_json::json!({
             "is": tense_is,
             "was": tense_was,
@@ -739,6 +755,8 @@ impl DashboardWriter {
             "tense_distribution": tense_distribution,
             "sort_compression": sort_compression,
             "null_dimension": null_dimension,
+            "anderson_selectivity": self.anderson_selectivity_json(),
+            "bingo_cube_summary": self.bingo_cube_json(),
             "trajectory": trajectory_analysis(&self.culture),
             "membrane_geometry": membrane_geometry(tense_is, tense_was, tense_willbe),
             "membrane_delta": membrane_delta(&self.culture),
@@ -854,6 +872,63 @@ impl DashboardWriter {
         }
     }
 
+    /// Read the shared Anderson profile and serialize for dashboard.json.
+    /// Returns null if no profile has been computed yet.
+    fn anderson_selectivity_json(&self) -> serde_json::Value {
+        let guard = self.anderson_profile.try_read();
+        let guard = match guard {
+            Ok(g) => g,
+            Err(_) => return serde_json::Value::Null,
+        };
+        let profile = match guard.as_ref() {
+            Some(p) => p,
+            None => return serde_json::Value::Null,
+        };
+        let r4 = |v: f64| (v * 10000.0).round() / 10000.0;
+        let modes: Vec<serde_json::Value> = profile.modes.iter().map(|m| {
+            serde_json::json!({
+                "class": &m.class,
+                "count": m.count,
+                "w_eff": r4(m.w_eff),
+                "d_eff": r4(m.d_eff),
+                "energy": r4(m.energy),
+                "system_size": r4(m.system_size),
+                "p_predicted": r4(m.p_predicted),
+                "p_observed": r4(m.p_observed),
+                "residual": r4(m.residual),
+            })
+        }).collect();
+        serde_json::json!({
+            "w_population": r4(profile.w_population),
+            "pielou_j": r4(profile.pielou_j),
+            "d_mesh": profile.d_mesh,
+            "selectivity_predicted": r4(profile.selectivity_predicted),
+            "selectivity_observed": r4(profile.selectivity_observed),
+            "imaginary_magnitude": r4(profile.imaginary_magnitude),
+            "mode_count": profile.modes.len(),
+            "modes": modes,
+        })
+    }
+
+    /// Summarize the bingo cube oracle state for dashboard.json.
+    /// Returns null if no oracle reference is available.
+    fn bingo_cube_json(&self) -> serde_json::Value {
+        let oracle = match self.oracle.as_ref() {
+            Some(o) => o,
+            None => return serde_json::Value::Null,
+        };
+        let generation = oracle.generation();
+        let trained = oracle.is_trained();
+        let observations = self.bingo_observations;
+        serde_json::json!({
+            "generation": generation,
+            "trained": trained,
+            "observations": observations,
+            "evolve_batch": 100,
+            "population_size": 12,
+        })
+    }
+
     /// Persist the sourdough culture to disk.
     pub fn save_culture(&self) {
         match serde_json::to_string(&self.culture) {
@@ -898,6 +973,418 @@ fn epitope_triggered_counts(culture: &DashboardCulture) -> [usize; 6] {
         if !profile.has_referer { counts[5] += 1; }                // referer_self_loop
     }
     counts
+}
+
+fn membrane_delta(culture: &DashboardCulture) -> serde_json::Value {
+    use std::f64::consts::PI;
+
+    let total = culture.ips.len() as f64;
+    if total < 10.0 {
+        return serde_json::json!({"status": "insufficient_data"});
+    }
+
+    let s = 4.0 * PI;
+    let opacity = 1.0 - 1.0 / s;
+    let reflection = s / (s + 1.0);
+    let delta = -1.0 / (s * (s + 1.0));
+    let gap_entities = (total * delta.abs()).round() as u64;
+
+    let mut sub_minute: u64 = 0;
+    let mut dwell_times: Vec<f64> = Vec::new();
+    let mut dwell_single: Vec<f64> = Vec::new();
+    let mut dwell_multi: Vec<f64> = Vec::new();
+
+    for (ip_h, profile) in &culture.ips {
+        if profile.requests <= 1 {
+            continue;
+        }
+        let dt = profile.last_seen - profile.first_seen;
+        if dt < 0.0 {
+            continue;
+        }
+        dwell_times.push(dt);
+        if dt < 60.0 {
+            sub_minute += 1;
+        }
+        let host_count = culture.ip_hosts.get(ip_h).map(|h| h.len()).unwrap_or(1);
+        if host_count > 1 {
+            dwell_multi.push(dt);
+        } else {
+            dwell_single.push(dt);
+        }
+    }
+
+    dwell_times.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+    dwell_single.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+    dwell_multi.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+
+    let n = dwell_times.len();
+    let median_s = if n > 0 { dwell_times[n / 2] } else { 0.0 };
+    let mean_s = if n > 0 { dwell_times.iter().sum::<f64>() / n as f64 } else { 0.0 };
+
+    let median_single = if !dwell_single.is_empty() { dwell_single[dwell_single.len() / 2] } else { 0.0 };
+    let median_multi = if !dwell_multi.is_empty() { dwell_multi[dwell_multi.len() / 2] } else { 0.0 };
+    let multi_single_ratio = if median_single > 0.0 { median_multi / median_single } else { 0.0 };
+
+    let bins: [(f64, f64); 6] = [
+        (0.0, 60.0), (60.0, 600.0), (600.0, 3600.0),
+        (3600.0, 21600.0), (21600.0, 86400.0), (86400.0, f64::MAX),
+    ];
+    let mut bin_counts = [0u64; 6];
+    for &dt in &dwell_times {
+        for (i, &(lo, hi)) in bins.iter().enumerate() {
+            if dt >= lo && dt < hi {
+                bin_counts[i] += 1;
+                break;
+            }
+        }
+    }
+    let n_f = n as f64;
+    let h_dwell = if n > 0 {
+        bin_counts.iter().map(|&c| {
+            if c > 0 {
+                let p = c as f64 / n_f;
+                -p * p.log2()
+            } else {
+                0.0
+            }
+        }).sum::<f64>()
+    } else {
+        0.0
+    };
+
+    let gap_pair_ratio = if gap_entities > 0 {
+        sub_minute as f64 / gap_entities as f64
+    } else {
+        0.0
+    };
+
+    let fast_pct = if n > 0 { bin_counts[0] as f64 / n_f * 100.0 } else { 0.0 };
+    let slow_pct = if n > 0 { bin_counts[4] as f64 / n_f * 100.0 } else { 0.0 };
+
+    serde_json::json!({
+        "opacity": (opacity * 10000.0).round() / 10000.0,
+        "reflection": (reflection * 10000.0).round() / 10000.0,
+        "delta": (delta * 100000.0).round() / 100000.0,
+        "gap_entities": gap_entities,
+        "sub_minute_was": sub_minute,
+        "gap_pair_ratio": (gap_pair_ratio * 1000.0).round() / 1000.0,
+        "dwell": {
+            "median_s": (median_s * 10.0).round() / 10.0,
+            "median_min": (median_s / 60.0 * 10.0).round() / 10.0,
+            "mean_min": (mean_s / 60.0 * 10.0).round() / 10.0,
+            "multi_single_ratio": (multi_single_ratio * 100.0).round() / 100.0,
+        },
+        "dwell_entropy_bits": (h_dwell * 10000.0).round() / 10000.0,
+        "bimodal": {
+            "fast_pct": (fast_pct * 10.0).round() / 10.0,
+            "slow_pct": (slow_pct * 10.0).round() / 10.0,
+        },
+    })
+}
+
+fn membrane_geometry(tense_is: usize, tense_was: usize, tense_willbe: usize) -> serde_json::Value {
+    use std::f64::consts::PI;
+
+    let is_f = tense_is as f64;
+    let was_f = tense_was as f64;
+    let wb_f = tense_willbe as f64;
+    let total_f = is_f + was_f + wb_f;
+
+    if was_f < 1.0 || total_f < 1.0 {
+        return serde_json::json!({"status": "insufficient_data"});
+    }
+
+    let is_was_ratio = is_f / was_f;
+    let four_pi = 4.0 * PI;
+    let dim_error_pct = ((is_was_ratio - four_pi) / four_pi * 100.0).abs();
+
+    let p_measured = was_f / (is_f + was_f);
+    let p_theory = 1.0 / (four_pi + 1.0);
+
+    let h_boundary = if p_measured > 0.0 && p_measured < 1.0 {
+        -p_measured * p_measured.log2() - (1.0 - p_measured) * (1.0 - p_measured).log2()
+    } else {
+        0.0
+    };
+    let channel_capacity = 1.0 - h_boundary;
+
+    let theta_unaided = PI + PI / four_pi;
+    let theta_with_nautilus = if (was_f + wb_f) > 0.0 {
+        let p_eff = (was_f + wb_f) / total_f;
+        if p_eff < 1.0 { PI / (1.0 - p_eff) } else { PI * 100.0 }
+    } else {
+        theta_unaided
+    };
+    let vision_gained_deg = (theta_with_nautilus - theta_unaided) * 180.0 / PI;
+
+    let prediction_coverage = if was_f > 0.0 { wb_f / was_f } else { 0.0 };
+    let measured_dim = if prediction_coverage > 0.0 { 1.0 / prediction_coverage } else { 0.0 };
+
+    let total_info_bits = channel_capacity * total_f;
+    let total_info_bytes = (total_info_bits / 8.0).round() as u64;
+
+    let fisher = if p_measured > 0.0 && p_measured < 1.0 {
+        1.0 / (p_measured * (1.0 - p_measured))
+    } else {
+        0.0
+    };
+
+    serde_json::json!({
+        "is_was_ratio": (is_was_ratio * 10000.0).round() / 10000.0,
+        "four_pi": (four_pi * 10000.0).round() / 10000.0,
+        "dim_error_pct": (dim_error_pct * 10000.0).round() / 10000.0,
+        "dimension": 3,
+        "permeation": {
+            "measured": (p_measured * 100000.0).round() / 100000.0,
+            "theory": (p_theory * 100000.0).round() / 100000.0,
+        },
+        "edge_entropy_bits": (h_boundary * 10000.0).round() / 10000.0,
+        "channel_capacity_bits": (channel_capacity * 10000.0).round() / 10000.0,
+        "vision": {
+            "unaided_rad": (theta_unaided * 10000.0).round() / 10000.0,
+            "unaided_deg": ((theta_unaided * 180.0 / PI) * 10.0).round() / 10.0,
+            "with_nautilus_rad": (theta_with_nautilus * 10000.0).round() / 10000.0,
+            "with_nautilus_deg": ((theta_with_nautilus * 180.0 / PI) * 10.0).round() / 10.0,
+            "gained_deg": (vision_gained_deg * 10.0).round() / 10.0,
+        },
+        "prediction": {
+            "coverage": (prediction_coverage * 100000.0).round() / 100000.0,
+            "measured_dim": (measured_dim * 1000.0).round() / 1000.0,
+            "one_third": (1.0_f64 / 3.0 * 100000.0).round() / 100000.0,
+        },
+        "total_information": {
+            "bits": total_info_bits.round() as u64,
+            "bytes": total_info_bytes,
+        },
+        "fisher_information": (fisher * 100.0).round() / 100.0,
+    })
+}
+
+fn threebody_pi(tense_is: usize, tense_was: usize, tense_willbe: usize) -> serde_json::Value {
+    use std::f64::consts::{E, PI};
+
+    let is_f = tense_is as f64;
+    let was_f = tense_was as f64;
+    let wb_f = tense_willbe as f64;
+    let np_f = was_f + wb_f;
+
+    if was_f < 1.0 || np_f < 1.0 {
+        return serde_json::json!({"status": "insufficient_data"});
+    }
+
+    let energy = is_f / was_f;
+    let mass = np_f / was_f;
+    let c_squared = energy / mass;
+
+    let d = 3.0_f64;
+    let energy_theory = 4.0 * PI;
+    let mass_theory = (d + 1.0) / d;
+    let c2_theory = d * PI;
+
+    let e_flat = 4.0;
+    let c2_flat = 3.0;
+    let m_flat = e_flat / c2_flat;
+
+    let e_to_pi = E.powf(PI);
+    let near_twenty = e_to_pi - PI;
+    let e_to_pi_plus_1 = E.powf(PI + 1.0);
+    let twenty_pi = 20.0 * PI;
+    let gelfond_err = ((e_to_pi_plus_1 - twenty_pi) / twenty_pi * 100.0).abs();
+    let near_int_gap = e_to_pi - PI - 20.0;
+
+    let archimedes_gap = PI - d;
+
+    let z_arg = (1.0 / c_squared).atan();
+
+    let pnp_err = ((c_squared - c2_theory) / c2_theory * 100.0).abs();
+
+    let r6 = |v: f64| (v * 1_000_000.0).round() / 1_000_000.0;
+    let r4 = |v: f64| (v * 10_000.0).round() / 10_000.0;
+
+    serde_json::json!({
+        "emc2": {
+            "energy": r6(energy),
+            "mass": r6(mass),
+            "c_squared": r6(c_squared),
+            "c": r6(c_squared.sqrt()),
+        },
+        "theory": {
+            "energy_4pi": r4(energy_theory),
+            "mass_4_3": r6(mass_theory),
+            "c2_3pi": r4(c2_theory),
+        },
+        "errors_pct": {
+            "energy": r4(((energy - energy_theory) / energy_theory * 100.0).abs()),
+            "c_squared": r4(pnp_err),
+        },
+        "flattening": {
+            "pi_equals_1": { "E": e_flat, "c2": c2_flat, "m": r6(m_flat) },
+            "mass_unchanged": (m_flat - mass_theory).abs() < 1e-10,
+        },
+        "euler_gelfond": {
+            "e_to_pi": r4(e_to_pi),
+            "near_twenty": r6(near_twenty),
+            "near_int_gap": r6(near_int_gap),
+            "e_to_pi_plus_1": r4(e_to_pi_plus_1),
+            "twenty_pi": r4(twenty_pi),
+            "approx_error_pct": r4(gelfond_err),
+        },
+        "archimedes_gap": r6(archimedes_gap),
+        "z_arg_over_pi": r6(z_arg / PI),
+    })
+}
+
+fn nautilus_predict(culture: &DashboardCulture) -> usize {
+    use std::collections::BTreeSet;
+    use std::hash::{Hash, Hasher};
+
+    let mut family_supersets: HashMap<u32, BTreeSet<String>> = HashMap::new();
+    let mut ip_orbit: HashMap<u64, u32> = HashMap::new();
+
+    for (ip_h, hosts) in &culture.ip_hosts {
+        if hosts.len() < 2 {
+            continue;
+        }
+        let sorted: BTreeSet<&str> = hosts.iter().map(|s| s.as_str()).collect();
+        let mut hasher = std::collections::hash_map::DefaultHasher::new();
+        for h in &sorted {
+            h.hash(&mut hasher);
+        }
+        let orbit_hash = hasher.finish() as u32;
+        ip_orbit.insert(*ip_h, orbit_hash);
+        family_supersets.entry(orbit_hash).or_default()
+            .extend(hosts.iter().cloned());
+    }
+
+    let mut family_sizes: HashMap<u32, usize> = HashMap::new();
+    for orbit in ip_orbit.values() {
+        *family_sizes.entry(*orbit).or_insert(0) += 1;
+    }
+
+    let mut predicted = 0usize;
+    for (ip_h, profile) in &culture.ips {
+        if profile.requests <= 1 {
+            continue;
+        }
+        if let Some(orbit) = ip_orbit.get(ip_h) {
+            if let Some(&size) = family_sizes.get(orbit) {
+                if size > 1 {
+                    predicted += 1;
+                }
+            }
+        }
+    }
+
+    predicted
+}
+
+fn trajectory_analysis(culture: &DashboardCulture) -> serde_json::Value {
+    use std::collections::BTreeSet;
+    use std::hash::{Hash, Hasher};
+
+    let mut multi_host_ips: usize = 0;
+    let mut single_host_ips: usize = 0;
+    let mut host_visit_counts: HashMap<String, usize> = HashMap::new();
+    let mut max_breadth: usize = 0;
+    let mut breadth_sum: usize = 0;
+
+    let mut orbital_families: HashMap<String, Vec<u64>> = HashMap::new();
+    let mut orbital_hostsets: HashMap<String, BTreeSet<String>> = HashMap::new();
+
+    for (ip_h, hosts) in &culture.ip_hosts {
+        if hosts.len() > 1 {
+            multi_host_ips += 1;
+            breadth_sum += hosts.len();
+            if hosts.len() > max_breadth {
+                max_breadth = hosts.len();
+            }
+            for h in hosts {
+                *host_visit_counts.entry(h.clone()).or_insert(0) += 1;
+            }
+
+            let sorted_hosts: BTreeSet<&str> = hosts.iter().map(|s| s.as_str()).collect();
+            let mut hasher = std::collections::hash_map::DefaultHasher::new();
+            for h in &sorted_hosts {
+                h.hash(&mut hasher);
+            }
+            let orbit_hash = format!("orb-{:08x}", hasher.finish() as u32);
+
+            orbital_families.entry(orbit_hash.clone()).or_default().push(*ip_h);
+            orbital_hostsets.entry(orbit_hash).or_default()
+                .extend(hosts.iter().cloned());
+        } else {
+            single_host_ips += 1;
+        }
+    }
+
+    let mut top_hosts: Vec<(String, usize)> = host_visit_counts.into_iter().collect();
+    top_hosts.sort_by(|a, b| b.1.cmp(&a.1));
+    top_hosts.truncate(10);
+
+    let avg_breadth = if multi_host_ips > 0 {
+        breadth_sum as f64 / multi_host_ips as f64
+    } else {
+        0.0
+    };
+
+    let returning_with_arc: usize = culture.ips.values()
+        .filter(|p| p.requests > 1 && p.host_count > 1)
+        .count();
+    let returning_single: usize = culture.ips.values()
+        .filter(|p| p.requests > 1 && p.host_count <= 1)
+        .count();
+
+    let total_families = orbital_families.len();
+    let alpha_bits = if multi_host_ips > 1 {
+        (multi_host_ips as f64).ln() / std::f64::consts::LN_2
+    } else { 0.0 };
+    let orbital_bits = if total_families > 1 {
+        (total_families as f64).ln() / std::f64::consts::LN_2
+    } else { 0.0 };
+    let orbital_gain = (alpha_bits - orbital_bits).max(0.0);
+
+    let mut families_sorted: Vec<(&str, usize)> = orbital_families.iter()
+        .map(|(k, v)| (k.as_str(), v.len()))
+        .collect();
+    families_sorted.sort_by(|a, b| b.1.cmp(&a.1));
+
+    let top_orbits: Vec<serde_json::Value> = families_sorted.iter()
+        .take(8)
+        .map(|(hash, count)| {
+            let hosts = orbital_hostsets.get(*hash)
+                .map(|s| s.iter().cloned().collect::<Vec<_>>())
+                .unwrap_or_default();
+            serde_json::json!({
+                "orbit": hash,
+                "ips": count,
+                "breadth": hosts.len(),
+                "hosts": hosts,
+            })
+        })
+        .collect();
+
+    serde_json::json!({
+        "multi_host_ips": multi_host_ips,
+        "single_host_ips": single_host_ips,
+        "max_breadth": max_breadth,
+        "avg_breadth": (avg_breadth * 10.0).round() / 10.0,
+        "returning_with_arc": returning_with_arc,
+        "returning_single_surface": returning_single,
+        "orbital_compression": {
+            "families": total_families,
+            "alpha_bits": (alpha_bits * 10.0).round() / 10.0,
+            "orbital_bits": (orbital_bits * 10.0).round() / 10.0,
+            "gain_bits": (orbital_gain * 10.0).round() / 10.0,
+            "ratio": if alpha_bits > 0.0 {
+                (orbital_gain / alpha_bits * 1000.0).round() / 1000.0
+            } else { 0.0 },
+        },
+        "top_orbits": top_orbits,
+        "top_cross_hosts": top_hosts.iter()
+            .map(|(h, c)| serde_json::json!({"host": h, "cross_visits": c}))
+            .collect::<Vec<_>>(),
+    })
 }
 
 #[cfg(test)]
