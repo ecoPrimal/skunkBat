@@ -424,47 +424,7 @@ impl DashboardWriter {
             0.0
         };
 
-        // Top offenders — sorted by request count. Uses ip_hash, not raw IP.
-        let mut top_offenders: Vec<_> = self.culture.ips.iter().collect();
-        top_offenders.sort_by(|a, b| b.1.requests.cmp(&a.1.requests));
-
-        let top_offenders_json: Vec<serde_json::Value> = top_offenders
-            .iter()
-            .take(25)
-            .map(|(ip_hash, p)| {
-                let top_repos: BTreeMap<String, u32> = p.repos.iter()
-                    .collect::<Vec<_>>()
-                    .into_iter()
-                    .take(3)
-                    .map(|(k, v)| (k.clone(), *v))
-                    .collect();
-                let top_paths: BTreeMap<String, u32> = p.path_types.iter()
-                    .collect::<Vec<_>>()
-                    .into_iter()
-                    .take(3)
-                    .map(|(k, v)| (k.clone(), *v))
-                    .collect();
-                let fmt_ts = |ts: f64| -> String {
-                    chrono::DateTime::from_timestamp(ts as i64, 0)
-                        .map(|d| d.format("%Y-%m-%d %H:%M:%S UTC").to_string())
-                        .unwrap_or_default()
-                };
-                let trio = score_trio(p);
-                serde_json::json!({
-                    "ip_hash": format!("{:016x}", ip_hash),
-                    "requests": p.requests,
-                    "first_seen": fmt_ts(p.first_seen),
-                    "last_seen": fmt_ts(p.last_seen),
-                    "is_fleet": p.is_fleet,
-                    "trio_class": trio.classification,
-                    "trio_attention": (trio.attention * 100.0).round() / 100.0,
-                    "trio_curiosity": (trio.curiosity * 100.0).round() / 100.0,
-                    "trio_interaction": (trio.interaction * 100.0).round() / 100.0,
-                    "top_repos": top_repos,
-                    "top_paths": top_paths,
-                })
-            })
-            .collect();
+        let top_offenders_json = self.top_offenders_json();
 
         // Subnets — subnet strings are kept (they're /24 prefixes, not full IPs)
         let mut subnets: Vec<_> = self.culture.subnet_counts.iter().collect();
@@ -504,44 +464,7 @@ impl DashboardWriter {
             }
         }
 
-        // Geography — progressive subdivision
-        let mut geo_sorted: Vec<_> = self.culture.country_counts.iter().collect();
-        geo_sorted.sort_by(|a, b| b.1.cmp(a.1));
-        let geo_json: Vec<serde_json::Value> = geo_sorted
-            .iter()
-            .map(|(country, count)| {
-                // Collect regions within this country
-                let mut regions: Vec<serde_json::Value> = self.culture.region_counts.iter()
-                    .filter(|(k, _)| k.starts_with(&format!("{}:", country)))
-                    .map(|(k, v)| {
-                        let region = k.splitn(2, ':').nth(1).unwrap_or("??");
-                        // Collect cities within this region
-                        let cities: Vec<serde_json::Value> = self.culture.city_counts.iter()
-                            .filter(|(ck, _)| ck.starts_with(&format!("{}:{}:", country, region)))
-                            .map(|(ck, cv)| {
-                                let city = ck.rsplitn(2, ':').next().unwrap_or("??");
-                                serde_json::json!({"city": city, "requests": cv})
-                            })
-                            .collect();
-                        serde_json::json!({
-                            "region": region,
-                            "requests": v,
-                            "cities": cities,
-                        })
-                    })
-                    .collect();
-                regions.sort_by(|a, b| {
-                    let ar = a["requests"].as_u64().unwrap_or(0);
-                    let br = b["requests"].as_u64().unwrap_or(0);
-                    br.cmp(&ar)
-                });
-                serde_json::json!({
-                    "country": country,
-                    "requests": count,
-                    "regions": regions,
-                })
-            })
-            .collect();
+        let geo_json = self.geography_json();
 
         // ASN type breakdown
         let asn_types: serde_json::Value = serde_json::json!(self.culture.asn_type_counts);
@@ -589,68 +512,7 @@ impl DashboardWriter {
             *collision_counts.entry(key).or_insert(0) += 1;
         }
 
-        // Epitope clusters — keyed by ip hash, no raw IPs exposed
-        let mut epitope_clusters: Vec<serde_json::Value> = self
-            .culture
-            .epitope_collisions
-            .iter()
-            .filter(|(_, ip_hashes)| !ip_hashes.is_empty())
-            .map(|(hash, ip_hashes)| {
-                let sample_ae = ip_hashes
-                    .iter()
-                    .next()
-                    .and_then(|h| self.culture.ips.get(h))
-                    .and_then(|p| p.accept_encoding.clone())
-                    .unwrap_or_else(|| "?".to_string());
-                let max_ua_pool = ip_hashes
-                    .iter()
-                    .filter_map(|h| self.culture.ips.get(h))
-                    .map(|p| p.ua_pool_size)
-                    .max()
-                    .unwrap_or(0);
-                let blame_total: u32 = ip_hashes
-                    .iter()
-                    .filter_map(|h| self.culture.ips.get(h))
-                    .map(|p| p.blame_count)
-                    .sum();
-                let commit_total: u32 = ip_hashes
-                    .iter()
-                    .filter_map(|h| self.culture.ips.get(h))
-                    .map(|p| p.commit_count)
-                    .sum();
-                let blame_ratio = if commit_total > 0 {
-                    blame_total as f64 / commit_total as f64
-                } else {
-                    0.0
-                };
-                let has_lang = ip_hashes
-                    .iter()
-                    .any(|h| self.culture.ips.get(h).map(|p| p.has_accept_lang).unwrap_or(false));
-
-                serde_json::json!({
-                    "hash": hash,
-                    "ips": ip_hashes.len(),
-                    "sample_ae": sample_ae,
-                    "ua_pool_size": max_ua_pool,
-                    "blame_ratio": (blame_ratio * 100.0).round() / 100.0,
-                    "has_lang": has_lang,
-                })
-            })
-            .collect();
-        epitope_clusters.sort_by(|a, b| {
-            b.get("ips")
-                .and_then(|v| v.as_u64())
-                .unwrap_or(0)
-                .cmp(&a.get("ips").and_then(|v| v.as_u64()).unwrap_or(0))
-        });
-        epitope_clusters.truncate(20);
-
-        let epitope_summary = serde_json::json!({
-            "total_hashed": self.culture.ips.values().filter(|p| p.epitope_hash.is_some()).count(),
-            "unique_hashes": self.culture.epitope_collisions.len(),
-            "largest_cluster": self.culture.epitope_collisions.values().map(|v| v.len()).max().unwrap_or(0),
-            "clusters_gt1": self.culture.epitope_collisions.values().filter(|v| v.len() > 1).count(),
-        });
+        let (epitope_clusters, epitope_summary) = self.epitope_json();
 
         // Tense distribution (Paper 48 — epitope sort compression).
         // Is = first observation (requests == 1), Was = repeat (requests > 1),
@@ -688,66 +550,7 @@ impl DashboardWriter {
             "grid_feedback": sort_result.quantize_for_grid(),
         });
 
-        // [∅]D — null dimension + V(D)J overlay (Wave 175).
-        // Coils the tense distribution and epitope conservation into the
-        // perturbation perspective: how far from singularity is the current state?
-        let null_dim = crate::sort_compression::NullDimension::compute(
-            (tense_is, tense_was, tense_willbe),
-            self.culture.ips.len(),
-            self.epitope_flip.as_ref(), // Wave 176: wired from topology conservation
-        );
-        let r6 = |v: f64| (v * 1_000_000.0).round() / 1_000_000.0;
-        let null_dimension = serde_json::json!({
-            "product": r6(null_dim.product),
-            "product_error": r6(null_dim.product_error),
-            "body_constant": r6(null_dim.body_constant),
-            "observation_cost": r6(null_dim.observation_cost),
-            "perturbation": r6(null_dim.perturbation),
-            "vdj_map": null_dim.vdj_map.iter().map(|r| match r {
-                crate::sort_compression::VdjRole::V => "V",
-                crate::sort_compression::VdjRole::D => "D",
-                crate::sort_compression::VdjRole::J => "J",
-            }).collect::<Vec<_>>(),
-            "vdj_distribution": {
-                "V": null_dim.vdj_distribution.0,
-                "D": null_dim.vdj_distribution.1,
-                "J": null_dim.vdj_distribution.2,
-            },
-            "vdj_gain_bits": r6(null_dim.vdj_gain_bits),
-            "self_awareness": r6(null_dim.self_awareness),
-            "j_error": r6(null_dim.j_error),
-            "gordian_equation": "J = (V + D) / \u{03c0}",
-            "j_interpretation": if null_dim.j_error > 0.1 { "mature: self > predicted (wisdom)" }
-                else if null_dim.j_error < -0.1 { "learning: self < predicted (growing)" }
-                else { "equilibrium: J \u{2248} \u{03c0}^(1/3)" },
-            "observer_fraction": r6(null_dim.observer_fraction),
-            "pi_body_proof": "\u{03c0}-body: 3 integer bodies + 1 irrational observer = \u{03c0}",
-            "gordian_proof": "J(self) = \u{2211}others(V+D) / \u{03c0}",
-            "tempo": r6(null_dim.tempo),
-            "t_equals_pi": "t = \u{03c0}",
-            // V, D, J as individual π-bodies
-            "v_pi": r6(null_dim.v_pi),
-            "d_pi": r6(null_dim.d_pi),
-            "j_pi": r6(null_dim.j_pi),
-            "vdj_product": r6(null_dim.vdj_product),
-            "vdj_product_error": r6(null_dim.vdj_product_error),
-            "vdj_budget": format!(
-                "V({:.2})\u{00d7}D({:.2})\u{00d7}J({:.2}) = {:.3} (\u{03c0}\u{00b3}\u{2248}31, \u{230a}\u{03c0}\u{00b3}\u{230b}={})",
-                null_dim.v_pi, null_dim.d_pi, null_dim.j_pi,
-                null_dim.vdj_product,
-                (std::f64::consts::PI.powi(3)).floor() as usize,
-            ),
-            "isotope_classes": null_dim.isotope_classes.iter().enumerate().map(|(i, (s, m, c))| {
-                serde_json::json!({
-                    "epitope": crate::sort_compression::EPITOPE_NAMES[i],
-                    "spin": s, "mass": m, "charge": c,
-                    "isotope": format!("{}{}{}", s, m, c),
-                })
-            }).collect::<Vec<_>>(),
-            "compression_inequality": format!(
-                "H(D) ≥ H(D|α) ≥ H(D|epitope) ≥ H(D|epitope,vdj) ≥ H(D|epitope,tense)"
-            ),
-        });
+        let null_dimension = self.null_dimension_json(tense_is, tense_was, tense_willbe);
 
         let dashboard = serde_json::json!({
             "ts": now,
@@ -894,6 +697,145 @@ impl DashboardWriter {
         if let Ok(mut guard) = self.anderson_profile.try_write() {
             *guard = Some(profile);
         }
+    }
+
+    /// Top offenders — sorted by request count, top 25.
+    fn top_offenders_json(&self) -> Vec<serde_json::Value> {
+        let mut top: Vec<_> = self.culture.ips.iter().collect();
+        top.sort_by(|a, b| b.1.requests.cmp(&a.1.requests));
+        top.iter().take(25).map(|(ip_hash, p)| {
+            let top_repos: BTreeMap<String, u32> = p.repos.iter().take(3).map(|(k, v)| (k.clone(), *v)).collect();
+            let top_paths: BTreeMap<String, u32> = p.path_types.iter().take(3).map(|(k, v)| (k.clone(), *v)).collect();
+            let fmt_ts = |ts: f64| -> String {
+                chrono::DateTime::from_timestamp(ts as i64, 0)
+                    .map(|d| d.format("%Y-%m-%d %H:%M:%S UTC").to_string())
+                    .unwrap_or_default()
+            };
+            let trio = score_trio(p);
+            serde_json::json!({
+                "ip_hash": format!("{:016x}", ip_hash),
+                "requests": p.requests, "first_seen": fmt_ts(p.first_seen),
+                "last_seen": fmt_ts(p.last_seen), "is_fleet": p.is_fleet,
+                "trio_class": trio.classification,
+                "trio_attention": (trio.attention * 100.0).round() / 100.0,
+                "trio_curiosity": (trio.curiosity * 100.0).round() / 100.0,
+                "trio_interaction": (trio.interaction * 100.0).round() / 100.0,
+                "top_repos": top_repos, "top_paths": top_paths,
+            })
+        }).collect()
+    }
+
+    /// Geography — progressive subdivision: country → region → city.
+    fn geography_json(&self) -> Vec<serde_json::Value> {
+        let mut geo_sorted: Vec<_> = self.culture.country_counts.iter().collect();
+        geo_sorted.sort_by(|a, b| b.1.cmp(a.1));
+        geo_sorted.iter().map(|(country, count)| {
+            let mut regions: Vec<serde_json::Value> = self.culture.region_counts.iter()
+                .filter(|(k, _)| k.starts_with(&format!("{}:", country)))
+                .map(|(k, v)| {
+                    let region = k.splitn(2, ':').nth(1).unwrap_or("??");
+                    let cities: Vec<serde_json::Value> = self.culture.city_counts.iter()
+                        .filter(|(ck, _)| ck.starts_with(&format!("{}:{}:", country, region)))
+                        .map(|(ck, cv)| {
+                            let city = ck.rsplitn(2, ':').next().unwrap_or("??");
+                            serde_json::json!({"city": city, "requests": cv})
+                        }).collect();
+                    serde_json::json!({"region": region, "requests": v, "cities": cities})
+                }).collect();
+            regions.sort_by(|a, b| {
+                b["requests"].as_u64().unwrap_or(0).cmp(&a["requests"].as_u64().unwrap_or(0))
+            });
+            serde_json::json!({"country": country, "requests": count, "regions": regions})
+        }).collect()
+    }
+
+    /// Epitope clusters + summary — keyed by ip hash, no raw IPs.
+    fn epitope_json(&self) -> (Vec<serde_json::Value>, serde_json::Value) {
+        let mut clusters: Vec<serde_json::Value> = self.culture.epitope_collisions.iter()
+            .filter(|(_, ips)| !ips.is_empty())
+            .map(|(hash, ips)| {
+                let sample_ae = ips.iter().next()
+                    .and_then(|h| self.culture.ips.get(h))
+                    .and_then(|p| p.accept_encoding.clone())
+                    .unwrap_or_else(|| "?".to_string());
+                let max_ua = ips.iter().filter_map(|h| self.culture.ips.get(h)).map(|p| p.ua_pool_size).max().unwrap_or(0);
+                let blame: u32 = ips.iter().filter_map(|h| self.culture.ips.get(h)).map(|p| p.blame_count).sum();
+                let commit: u32 = ips.iter().filter_map(|h| self.culture.ips.get(h)).map(|p| p.commit_count).sum();
+                let blame_ratio = if commit > 0 { blame as f64 / commit as f64 } else { 0.0 };
+                let has_lang = ips.iter().any(|h| self.culture.ips.get(h).map(|p| p.has_accept_lang).unwrap_or(false));
+                serde_json::json!({
+                    "hash": hash, "ips": ips.len(), "sample_ae": sample_ae,
+                    "ua_pool_size": max_ua, "blame_ratio": (blame_ratio * 100.0).round() / 100.0,
+                    "has_lang": has_lang,
+                })
+            }).collect();
+        clusters.sort_by(|a, b| b["ips"].as_u64().unwrap_or(0).cmp(&a["ips"].as_u64().unwrap_or(0)));
+        clusters.truncate(20);
+        let summary = serde_json::json!({
+            "total_hashed": self.culture.ips.values().filter(|p| p.epitope_hash.is_some()).count(),
+            "unique_hashes": self.culture.epitope_collisions.len(),
+            "largest_cluster": self.culture.epitope_collisions.values().map(|v| v.len()).max().unwrap_or(0),
+            "clusters_gt1": self.culture.epitope_collisions.values().filter(|v| v.len() > 1).count(),
+        });
+        (clusters, summary)
+    }
+
+    /// [∅]D — null dimension + V(D)J overlay (Wave 175).
+    fn null_dimension_json(&self, tense_is: usize, tense_was: usize, tense_willbe: usize) -> serde_json::Value {
+        let null_dim = crate::sort_compression::NullDimension::compute(
+            (tense_is, tense_was, tense_willbe),
+            self.culture.ips.len(),
+            self.epitope_flip.as_ref(),
+        );
+        let r6 = |v: f64| (v * 1_000_000.0).round() / 1_000_000.0;
+        serde_json::json!({
+            "product": r6(null_dim.product),
+            "product_error": r6(null_dim.product_error),
+            "body_constant": r6(null_dim.body_constant),
+            "observation_cost": r6(null_dim.observation_cost),
+            "perturbation": r6(null_dim.perturbation),
+            "vdj_map": null_dim.vdj_map.iter().map(|r| match r {
+                crate::sort_compression::VdjRole::V => "V",
+                crate::sort_compression::VdjRole::D => "D",
+                crate::sort_compression::VdjRole::J => "J",
+            }).collect::<Vec<_>>(),
+            "vdj_distribution": {
+                "V": null_dim.vdj_distribution.0,
+                "D": null_dim.vdj_distribution.1,
+                "J": null_dim.vdj_distribution.2,
+            },
+            "vdj_gain_bits": r6(null_dim.vdj_gain_bits),
+            "self_awareness": r6(null_dim.self_awareness),
+            "j_error": r6(null_dim.j_error),
+            "gordian_equation": "J = (V + D) / \u{03c0}",
+            "j_interpretation": if null_dim.j_error > 0.1 { "mature: self > predicted (wisdom)" }
+                else if null_dim.j_error < -0.1 { "learning: self < predicted (growing)" }
+                else { "equilibrium: J \u{2248} \u{03c0}^(1/3)" },
+            "observer_fraction": r6(null_dim.observer_fraction),
+            "pi_body_proof": "\u{03c0}-body: 3 integer bodies + 1 irrational observer = \u{03c0}",
+            "gordian_proof": "J(self) = \u{2211}others(V+D) / \u{03c0}",
+            "tempo": r6(null_dim.tempo),
+            "t_equals_pi": "t = \u{03c0}",
+            "v_pi": r6(null_dim.v_pi),
+            "d_pi": r6(null_dim.d_pi),
+            "j_pi": r6(null_dim.j_pi),
+            "vdj_product": r6(null_dim.vdj_product),
+            "vdj_product_error": r6(null_dim.vdj_product_error),
+            "vdj_budget": format!(
+                "V({:.2})\u{00d7}D({:.2})\u{00d7}J({:.2}) = {:.3} (\u{03c0}\u{00b3}\u{2248}31, \u{230a}\u{03c0}\u{00b3}\u{230b}={})",
+                null_dim.v_pi, null_dim.d_pi, null_dim.j_pi,
+                null_dim.vdj_product,
+                (std::f64::consts::PI.powi(3)).floor() as usize,
+            ),
+            "isotope_classes": null_dim.isotope_classes.iter().enumerate().map(|(i, (s, m, c))| {
+                serde_json::json!({
+                    "epitope": crate::sort_compression::EPITOPE_NAMES[i],
+                    "spin": s, "mass": m, "charge": c,
+                    "isotope": format!("{}{}{}", s, m, c),
+                })
+            }).collect::<Vec<_>>(),
+            "compression_inequality": "H(D) ≥ H(D|α) ≥ H(D|epitope) ≥ H(D|epitope,vdj) ≥ H(D|epitope,tense)",
+        })
     }
 
     /// Read the shared Anderson profile and serialize for dashboard.json.
