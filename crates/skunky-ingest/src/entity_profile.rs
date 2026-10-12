@@ -248,6 +248,14 @@ pub struct TimingProfile {
     pub classification: String,
     pub burst_count: u64,
     pub pause_count: u64,
+    /// Wave 173: Transport channel jitter correction (Paper 76).
+    ///
+    /// Mobile connections (cell tower) introduce jitter that inflates burst_ratio.
+    /// The cell tower is a membrane — it distorts the timing signal.
+    /// `transport_correction` is the burst threshold multiplier (1.0 = no correction).
+    pub transport_correction: f64,
+    /// True when the entity's platform is mobile (iPhone/Android).
+    pub is_mobile: bool,
 }
 
 /// A detected sub-system within an entity.
@@ -400,6 +408,10 @@ pub(crate) fn build_profile(entity_id: EntityId, accum: EntityAccum) -> EntityPr
         0
     };
 
+    // Capture platform before any moves out of accum (Paper 76)
+    let entity_platform = accum.platform();
+    let is_mobile_entity = matches!(entity_platform, "iPhone" | "Android");
+
     // Timing
     let mut ts_sorted: Vec<f64> = accum.timestamps;
     ts_sorted.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
@@ -423,6 +435,20 @@ pub(crate) fn build_profile(entity_id: EntityId, accum: EntityAccum) -> EntityPr
             else if cv < 0.5 { "SEMI-REGULAR" }
             else { "VARIED" };
 
+        // Transport channel correction (Paper 76).
+        // Mobile connections (cell tower) add jitter that inflates burst_ratio.
+        // The cell tower is a membrane — signals pass through it distorted.
+        // Widen the burst threshold proportionally to excess jitter.
+        let is_mobile = is_mobile_entity;
+        let transport_correction = if is_mobile {
+            // CV above 0.5 is natural mobile jitter — widen threshold.
+            // Cap at 2.0× (threshold can at most double from 50% to 100%).
+            let jitter_excess = (cv - 0.5).max(0.0);
+            1.0 + jitter_excess.min(1.0)
+        } else {
+            1.0
+        };
+
         TimingProfile {
             mean_interval_ms: (mean * 1000.0 * 10.0).round() / 10.0,
             median_interval_ms: (median * 1000.0 * 10.0).round() / 10.0,
@@ -430,6 +456,8 @@ pub(crate) fn build_profile(entity_id: EntityId, accum: EntityAccum) -> EntityPr
             classification: classification.to_string(),
             burst_count: bursts,
             pause_count: pauses,
+            transport_correction: (transport_correction * 1000.0).round() / 1000.0,
+            is_mobile,
         }
     } else {
         TimingProfile {
@@ -439,6 +467,8 @@ pub(crate) fn build_profile(entity_id: EntityId, accum: EntityAccum) -> EntityPr
             classification: "INSUFFICIENT_DATA".to_string(),
             burst_count: 0,
             pause_count: 0,
+            transport_correction: 1.0,
+            is_mobile: is_mobile_entity,
         }
     };
 
@@ -666,18 +696,29 @@ pub(crate) fn build_profile(entity_id: EntityId, accum: EntityAccum) -> EntityPr
     let burst_ratio_epitope = if intervals.len() > 10 {
         let bursts = intervals.iter().filter(|&&i| i < 3.0).count();
         let pct = bursts as f64 / intervals.len() as f64 * 100.0;
-        let threshold = 50.0_f64;
+        // Transport channel correction (Paper 76): mobile connections have
+        // natural jitter from cell tower handoffs that inflates burst count.
+        // The correction widens the threshold so mobile humans aren't
+        // penalized for their transport channel being a membrane.
+        let threshold = 50.0_f64 * timing.transport_correction;
         let triggered = pct > threshold;
         epitope_count += 1;
         if triggered { epitope_triggered += 1; }
-        // Vitality: peaks at pct == threshold.  76% → v = 0.48.  99% → v ≈ 0.02.
         let v = (1.0 - (pct - threshold).abs() / threshold).max(0.0);
         vitality_sum += v;
+        let desc = if timing.transport_correction > 1.001 {
+            format!(
+                "{:.1}% of intervals <3s (threshold={:.0}%, mobile transport correction={:.2}×)",
+                pct, threshold, timing.transport_correction
+            )
+        } else {
+            format!("{:.1}% of intervals <3s", pct)
+        };
         Some(EpitopeResult {
             score: (pct * 10.0).round() / 10.0,
             triggered,
             vitality: (v * 1000.0).round() / 1000.0,
-            description: format!("{:.1}% of intervals <3s", pct),
+            description: desc,
         })
     } else { None };
 

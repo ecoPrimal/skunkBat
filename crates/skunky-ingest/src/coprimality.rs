@@ -272,6 +272,8 @@ mod tests {
                 classification: String::new(),
                 burst_count: 0,
                 pause_count: 0,
+                transport_correction: 1.0,
+                is_mobile: false,
             },
             sub_systems: vec![],
             vuln_probes: vec![],

@@ -342,6 +342,8 @@ mod tests {
                 classification: if cv < 0.15 { "METRONOMIC" } else { "VARIED" }.to_string(),
                 burst_count: 0,
                 pause_count: 0,
+                transport_correction: 1.0,
+                is_mobile: false,
             },
             sub_systems: vec![],
             vuln_probes: vec![],
