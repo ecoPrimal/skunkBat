@@ -544,49 +544,7 @@ impl NullDimension {
         let sigma = variance.sqrt();
         let tempo = (1.0 - sigma / (2.0 * PI / 3.0)).clamp(0.0, 1.0);
 
-        // ── Isotope classes: spin × mass × charge ──
-        // Each epitope gets 3 class values (0, 1, or 2) based on behavior:
-        //   spin  = flip rate class:   0=frozen, 1=moderate, 2=volatile
-        //   mass  = evaluation depth:  0=shallow, 1=moderate, 2=deep
-        //   charge = correlation class: 0=isolated, 1=moderate, 2=entangled
-        // Without conservation data: assign from sort-order position.
-        let mut isotope_classes = [(1u8, 1u8, 1u8); 6];
-        if let Some(fd) = flip_data {
-            for i in 0..6 {
-                // Spin: flip rate → 3 bands
-                let flip_rate = if fd.evaluated[i] > 0 {
-                    fd.flipped[i] as f64 / fd.evaluated[i] as f64
-                } else { 0.0 };
-                let spin = if flip_rate < 0.1 { 0 } else if flip_rate < 0.4 { 1 } else { 2 };
-
-                // Mass: evaluation depth → 3 bands
-                let iso_match_f = fd.matched.max(1) as f64;
-                let eval_rate = fd.evaluated[i] as f64 / iso_match_f;
-                let mass = if eval_rate < 0.3 { 0 } else if eval_rate < 0.7 { 1 } else { 2 };
-
-                // Charge: how far from the mean flip rate (correlation with the ensemble)
-                let mean_flip: f64 = (0..6).map(|j| {
-                    if fd.evaluated[j] > 0 { fd.flipped[j] as f64 / fd.evaluated[j] as f64 } else { 0.0 }
-                }).sum::<f64>() / 6.0;
-                let deviation = (flip_rate - mean_flip).abs();
-                let charge = if deviation < 0.1 { 1 } // moderate — near mean
-                    else if flip_rate > mean_flip { 2 } // entangled — moves with the crowd
-                    else { 0 }; // isolated — moves against
-
-                isotope_classes[i] = (spin, mass, charge);
-            }
-        } else {
-            // Default: assign by information-content rank
-            // High-info epitopes = high spin, high mass. Low-info = low.
-            isotope_classes = [
-                (2, 2, 2), // burst_ratio: volatile, deep, entangled
-                (2, 2, 1), // reading_deficit: volatile, deep, moderate
-                (1, 1, 1), // ua_pool_poverty: moderate all
-                (1, 1, 0), // sec_fetch_monotone: moderate, moderate, isolated
-                (0, 2, 1), // session_absent: frozen, deep, moderate
-                (0, 1, 0), // referer_self_loop: frozen, moderate, isolated
-            ];
-        }
+        let isotope_classes = compute_isotope_classes(flip_data);
 
         // ── V, D, J as individual π-bodies ──
         //
@@ -632,6 +590,37 @@ impl NullDimension {
             vdj_product_error,
         }
     }
+}
+
+/// Isotope classes: spin × mass × charge for each of the 6 epitopes.
+/// With flip data: computed from flip rate, evaluation depth, ensemble correlation.
+/// Without: assigned by information-content rank.
+fn compute_isotope_classes(flip_data: Option<&EpitopeFlipData>) -> [(u8, u8, u8); 6] {
+    let Some(fd) = flip_data else {
+        return [
+            (2, 2, 2), // burst_ratio: volatile, deep, entangled
+            (2, 2, 1), // reading_deficit: volatile, deep, moderate
+            (1, 1, 1), // ua_pool_poverty: moderate all
+            (1, 1, 0), // sec_fetch_monotone: moderate, moderate, isolated
+            (0, 2, 1), // session_absent: frozen, deep, moderate
+            (0, 1, 0), // referer_self_loop: frozen, moderate, isolated
+        ];
+    };
+    let mut classes = [(1u8, 1u8, 1u8); 6];
+    let mean_flip: f64 = (0..6).map(|j| {
+        if fd.evaluated[j] > 0 { fd.flipped[j] as f64 / fd.evaluated[j] as f64 } else { 0.0 }
+    }).sum::<f64>() / 6.0;
+    let match_f = fd.matched.max(1) as f64;
+    for i in 0..6 {
+        let flip_rate = if fd.evaluated[i] > 0 { fd.flipped[i] as f64 / fd.evaluated[i] as f64 } else { 0.0 };
+        let spin = if flip_rate < 0.1 { 0 } else if flip_rate < 0.4 { 1 } else { 2 };
+        let eval_rate = fd.evaluated[i] as f64 / match_f;
+        let mass = if eval_rate < 0.3 { 0 } else if eval_rate < 0.7 { 1 } else { 2 };
+        let deviation = (flip_rate - mean_flip).abs();
+        let charge = if deviation < 0.1 { 1 } else if flip_rate > mean_flip { 2 } else { 0 };
+        classes[i] = (spin, mass, charge);
+    }
+    classes
 }
 
 #[cfg(test)]
