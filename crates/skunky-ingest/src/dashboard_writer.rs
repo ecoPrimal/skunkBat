@@ -107,6 +107,8 @@ pub struct DashboardWriter {
     oracle: Option<crate::cube_oracle::SharedOracle>,
     /// Counter of observations fed to the oracle (for dashboard summary).
     bingo_observations: u64,
+    /// Entity count from topology — distinct entity types observed.
+    entity_count: usize,
 }
 
 impl DashboardWriter {
@@ -144,6 +146,7 @@ impl DashboardWriter {
             epitope_flip: None,
             oracle: None,
             bingo_observations: 0,
+            entity_count: 0,
         };
         tracing::info!(
             output = %writer.output_path.display(),
@@ -159,6 +162,10 @@ impl DashboardWriter {
     /// Set the latest epitope flip data from topology conservation analysis.
     pub fn set_epitope_flip(&mut self, flip: Option<crate::sort_compression::EpitopeFlipData>) {
         self.epitope_flip = flip;
+    }
+    /// Set entity count from topology.
+    pub fn set_entity_count(&mut self, count: usize) {
+        self.entity_count = count;
     }
 
     /// Set the shared bingo cube oracle reference for dashboard summary.
@@ -750,6 +757,7 @@ impl DashboardWriter {
             "fleet_requests": self.culture.fleet_requests,
             "rps": (rps * 10.0).round() / 10.0,
             "unique_ips": self.culture.ips.len(),
+            "entity_count": self.entity_count,
             "fleet_ips": fleet_count,
             "human_ips": human_count,
             "fleet_pct": (fleet_pct * 10.0).round() / 10.0,

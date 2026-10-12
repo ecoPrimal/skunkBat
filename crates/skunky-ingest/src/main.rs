@@ -793,6 +793,7 @@ async fn run(cli: Cli) -> Result<(), IngestError> {
     // Wire conservation flip data from topology → dashboard (Wave 176).
     if let (Some(tw), Some(dw)) = (&topology_writer, &mut dashboard_writer) {
         dw.set_epitope_flip(tw.epitope_flip_data());
+        dw.set_entity_count(tw.entity_count());
     }
 
     // Flush dashboard — final write + culture save before shutdown.

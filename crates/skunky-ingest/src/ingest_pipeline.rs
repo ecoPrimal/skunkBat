@@ -88,6 +88,7 @@ pub(crate) async fn process_line(
     // Wire conservation flip data from topology → dashboard (Wave 176).
     if let (Some(tw), Some(dw)) = (&topology_writer, &mut dashboard) {
         dw.set_epitope_flip(tw.epitope_flip_data());
+        dw.set_entity_count(tw.entity_count());
     }
 
     // Dashboard — per-IP behavioral tracking for signal site.

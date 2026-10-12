@@ -826,6 +826,11 @@ impl TopologyWriter {
         }
     }
 
+    /// Delegate entity count from inner builder.
+    pub fn entity_count(&self) -> usize {
+        self.builder.entity_count()
+    }
+
     /// Persist the sourdough culture to disk — survives reboots.
     pub fn save_culture(&self) {
         self.builder.save(&self.state_path);

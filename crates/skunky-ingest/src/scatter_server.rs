@@ -34,6 +34,36 @@ use std::time::Duration;
 use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
 use tokio::net::TcpListener;
 
+/// Compressed HTTP response helper — 18 write+flush+return patterns → 1 function.
+async fn send_response(
+    writer: &mut (impl AsyncWriteExt + Unpin),
+    status: &str, content_type: &str, body: &str,
+    extra_headers: &str,
+) -> std::io::Result<()> {
+    let response = format!(
+        "HTTP/1.1 {status}\r\n\
+         Content-Type: {content_type}\r\n\
+         Content-Length: {}\r\n\
+         Connection: close\r\n\
+         {extra_headers}\
+         \r\n\
+         {body}",
+        body.len(),
+    );
+    writer.write_all(response.as_bytes()).await?;
+    writer.flush().await
+}
+
+/// Serve a file from disk — 11 read+format+write patterns → 1 function.
+async fn serve_file(
+    writer: &mut (impl AsyncWriteExt + Unpin),
+    file_path: &str, content_type: &str, fallback: &str,
+) -> std::io::Result<()> {
+    let body = std::fs::read_to_string(file_path).unwrap_or_else(|_| fallback.to_string());
+    send_response(writer, "200 OK", content_type, &body,
+        "Cache-Control: no-cache, no-store\r\nAccess-Control-Allow-Origin: *\r\n").await
+}
+
 use crate::scyborg_prism::{ScyBorgPrism, OpsonizationSalt, SharedViolationLedger};
 
 pub use crate::scatter_types::*;
@@ -317,22 +347,10 @@ async fn handle_request(
     }
 
     // ── BLACKWALL: Facebook bot gets OG card ──
-    // Triggered by User-Agent detection OR X-Blackwall header from Caddy delegation.
-    // Permeability graduated by Anderson distance from influence (6 tiers).
     if is_facebook_bot || is_blackwall {
         let og_card = blackwall_og_card(&request_host);
-        let response = format!(
-            "HTTP/1.1 200 OK\r\n\
-             Content-Type: text/html; charset=utf-8\r\n\
-             Content-Length: {}\r\n\
-             Connection: close\r\n\
-             Cache-Control: public, max-age=300\r\n\
-             \r\n\
-             {og_card}",
-            og_card.len(),
-        );
-        writer.write_all(response.as_bytes()).await?;
-        writer.flush().await?;
+        send_response(&mut writer, "200 OK", "text/html; charset=utf-8",
+            &og_card, "Cache-Control: public, max-age=300\r\n").await?;
         return Ok(());
     }
 
@@ -354,17 +372,7 @@ async fn handle_request(
         } else {
             format!(r#"{{"allowed":false,"domain":"{domain}"}}"#)
         };
-        let response = format!(
-            "HTTP/1.1 {status}\r\n\
-             Content-Type: application/json\r\n\
-             Content-Length: {}\r\n\
-             Connection: close\r\n\
-             \r\n\
-             {body}",
-            body.len(),
-        );
-        writer.write_all(response.as_bytes()).await?;
-        writer.flush().await?;
+        send_response(&mut writer, status, "application/json", &body, "").await?;
         if !allowed {
             tracing::debug!(domain = %domain, "🔒 aperture denied cert for {domain}");
         }
@@ -399,18 +407,8 @@ async fn handle_request(
                 r#"{"action":"not_found"}"#.to_string()
             }
         };
-        let response = format!(
-            "HTTP/1.1 200 OK\r\n\
-             Content-Type: application/json\r\n\
-             Content-Length: {}\r\n\
-             Connection: close\r\n\
-             Cache-Control: public, max-age=60\r\n\
-             \r\n\
-             {body}",
-            body.len(),
-        );
-        writer.write_all(response.as_bytes()).await?;
-        writer.flush().await?;
+        send_response(&mut writer, "200 OK", "application/json", &body,
+            "Cache-Control: public, max-age=60\r\n").await?;
         tracing::debug!(
             subdomain = %subdomain,
             "🔬 aperture resolved: {subdomain} → {:?}",
@@ -419,63 +417,20 @@ async fn handle_request(
         return Ok(());
     }
 
-    // ── LIVE TERMINAL FEED — /live endpoint ──
+    // ── FILE-SERVE ROUTES: live terminal data ──
     if path == "/live" {
-        let feed_path = std::path::Path::new("/opt/membrane/live-terminal/feed.txt");
-        let body = std::fs::read_to_string(feed_path).unwrap_or_else(|_| "feed not available\n".to_string());
-        let response = format!(
-            "HTTP/1.1 200 OK\r\n\
-             Content-Type: text/plain; charset=utf-8\r\n\
-             Content-Length: {}\r\n\
-             Connection: close\r\n\
-             Cache-Control: no-cache, no-store\r\n\
-             Access-Control-Allow-Origin: *\r\n\
-             \r\n\
-             {body}",
-            body.len(),
-        );
-        writer.write_all(response.as_bytes()).await?;
-        writer.flush().await?;
+        serve_file(&mut writer, "/opt/membrane/live-terminal/feed.txt",
+            "text/plain; charset=utf-8", "feed not available\n").await?;
         return Ok(());
     }
-
-    // ── DASHBOARD JSON — /dashboard.json endpoint ──
     if path == "/dashboard.json" {
-        let dash_path = std::path::Path::new("/opt/membrane/live-terminal/dashboard.json");
-        let body = std::fs::read_to_string(dash_path).unwrap_or_else(|_| "{}".to_string());
-        let response = format!(
-            "HTTP/1.1 200 OK\r\n\
-             Content-Type: application/json; charset=utf-8\r\n\
-             Content-Length: {}\r\n\
-             Connection: close\r\n\
-             Cache-Control: no-cache, no-store\r\n\
-             Access-Control-Allow-Origin: *\r\n\
-             \r\n\
-             {body}",
-            body.len(),
-        );
-        writer.write_all(response.as_bytes()).await?;
-        writer.flush().await?;
+        serve_file(&mut writer, "/opt/membrane/live-terminal/dashboard.json",
+            "application/json; charset=utf-8", "{}").await?;
         return Ok(());
     }
-
-    // ── TOPOLOGY — /topology.json endpoint ──
     if path == "/topology.json" {
-        let topo_path = std::path::Path::new("/opt/membrane/live-terminal/topology.json");
-        let body = std::fs::read_to_string(topo_path).unwrap_or_else(|_| "{}".to_string());
-        let response = format!(
-            "HTTP/1.1 200 OK\r\n\
-             Content-Type: application/json; charset=utf-8\r\n\
-             Content-Length: {}\r\n\
-             Connection: close\r\n\
-             Cache-Control: no-cache, no-store\r\n\
-             Access-Control-Allow-Origin: *\r\n\
-             \r\n\
-             {body}",
-            body.len(),
-        );
-        writer.write_all(response.as_bytes()).await?;
-        writer.flush().await?;
+        serve_file(&mut writer, "/opt/membrane/live-terminal/topology.json",
+            "application/json; charset=utf-8", "{}").await?;
         return Ok(());
     }
 
@@ -492,20 +447,8 @@ async fn handle_request(
                 body = format!("{},\"anderson_profile\":{}}}", &body[..body.len()-1], anderson_json);
             }
         }
-        let response = format!(
-            "HTTP/1.1 200 OK\r\n\
-             Content-Type: application/json\r\n\
-             Content-Length: {}\r\n\
-             Connection: close\r\n\
-             Cache-Control: public, max-age=60\r\n\
-             Access-Control-Allow-Origin: *\r\n\
-             X-Content-Type-Options: nosniff\r\n\
-             \r\n\
-             {body}",
-            body.len(),
-        );
-        writer.write_all(response.as_bytes()).await?;
-        writer.flush().await?;
+        send_response(&mut writer, "200 OK", "application/json", &body,
+            "Cache-Control: public, max-age=60\r\nAccess-Control-Allow-Origin: *\r\nX-Content-Type-Options: nosniff\r\n").await?;
         metrics.plasmid_served.fetch_add(1, Ordering::Relaxed);
         metrics.record(body.len() as u64);
         return Ok(());
@@ -517,20 +460,8 @@ async fn handle_request(
             .or_else(|_| std::fs::read_to_string("/etc/membrane/gate-name").map(|s| s.trim().to_string()))
             .unwrap_or_else(|_| "unknown".to_string());
         let body = metrics.export_json(&layer_name);
-        let response = format!(
-            "HTTP/1.1 200 OK\r\n\
-             Content-Type: application/json\r\n\
-             Content-Length: {}\r\n\
-             Connection: close\r\n\
-             Cache-Control: no-cache\r\n\
-             Access-Control-Allow-Origin: *\r\n\
-             X-Content-Type-Options: nosniff\r\n\
-             \r\n\
-             {body}",
-            body.len(),
-        );
-        writer.write_all(response.as_bytes()).await?;
-        writer.flush().await?;
+        send_response(&mut writer, "200 OK", "application/json", &body,
+            "Cache-Control: no-cache\r\nAccess-Control-Allow-Origin: *\r\nX-Content-Type-Options: nosniff\r\n").await?;
         return Ok(());
     }
 
@@ -586,19 +517,8 @@ async fn handle_request(
             observer_state,
         );
 
-        let response = format!(
-            "HTTP/1.1 200 OK\r\n\
-             Content-Type: application/json\r\n\
-             Content-Length: {}\r\n\
-             Connection: close\r\n\
-             Cache-Control: no-cache\r\n\
-             Access-Control-Allow-Origin: *\r\n\
-             \r\n\
-             {body}",
-            body.len(),
-        );
-        writer.write_all(response.as_bytes()).await?;
-        writer.flush().await?;
+        send_response(&mut writer, "200 OK", "application/json", &body,
+            "Cache-Control: no-cache\r\nAccess-Control-Allow-Origin: *\r\n").await?;
         return Ok(());
     }
 
@@ -611,20 +531,8 @@ async fn handle_request(
         if is_post {
             if let Some(ref body) = request_body {
                 let receipt = generate_nft_receipt(body, generator.seed);
-                let response = format!(
-                    "HTTP/1.1 200 OK\r\n\
-                     Content-Type: application/json; charset=utf-8\r\n\
-                     Content-Length: {}\r\n\
-                     Connection: close\r\n\
-                     Cache-Control: no-cache, no-store\r\n\
-                     Access-Control-Allow-Origin: *\r\n\
-                     Access-Control-Allow-Headers: Content-Type\r\n\
-                     \r\n\
-                     {receipt}",
-                    receipt.len(),
-                );
-                writer.write_all(response.as_bytes()).await?;
-                writer.flush().await?;
+                send_response(&mut writer, "200 OK", "application/json; charset=utf-8", &receipt,
+                    "Cache-Control: no-cache, no-store\r\nAccess-Control-Allow-Origin: *\r\nAccess-Control-Allow-Headers: Content-Type\r\n").await?;
                 tracing::info!("🧬 NFT contribution received — human entropy fermented");
                 let new_count = metrics.nft_contributions.fetch_add(1, Ordering::Relaxed) + 1;
                 let _ = std::fs::write("/var/lib/skunky-ingest/nft-count", new_count.to_string());
@@ -634,31 +542,13 @@ async fn handle_request(
         }
         // CORS preflight for cross-origin POSTs
         if request_line.starts_with("OPTIONS") {
-            let response = "HTTP/1.1 204 No Content\r\n\
-                Access-Control-Allow-Origin: *\r\n\
-                Access-Control-Allow-Methods: POST, GET, OPTIONS\r\n\
-                Access-Control-Allow-Headers: Content-Type\r\n\
-                Access-Control-Max-Age: 86400\r\n\
-                Connection: close\r\n\r\n";
-            writer.write_all(response.as_bytes()).await?;
-            writer.flush().await?;
+            send_response(&mut writer, "204 No Content", "text/plain", "",
+                "Access-Control-Allow-Origin: *\r\nAccess-Control-Allow-Methods: POST, GET, OPTIONS\r\nAccess-Control-Allow-Headers: Content-Type\r\nAccess-Control-Max-Age: 86400\r\n").await?;
             return Ok(());
         }
         // GET: serve THE BUTTON page
-        let response = format!(
-            "HTTP/1.1 200 OK\r\n\
-             Content-Type: text/html; charset=utf-8\r\n\
-             Content-Length: {}\r\n\
-             Connection: close\r\n\
-             Cache-Control: no-cache, no-store\r\n\
-             X-License: AGPL-3.0-or-later; scyBorg\r\n\
-             \r\n\
-             {}",
-            CONTRIBUTE_PAGE.len(),
-            CONTRIBUTE_PAGE,
-        );
-        writer.write_all(response.as_bytes()).await?;
-        writer.flush().await?;
+        send_response(&mut writer, "200 OK", "text/html; charset=utf-8", CONTRIBUTE_PAGE,
+            "Cache-Control: no-cache, no-store\r\nX-License: AGPL-3.0-or-later; scyBorg\r\n").await?;
         tracing::info!("🔴 THE BUTTON served to human");
         return Ok(());
     }
@@ -667,19 +557,8 @@ async fn handle_request(
     if path == "/nft-count" || path == "/nft-count/" {
         let count = metrics.nft_contributions.load(Ordering::Relaxed);
         let body = format!(r#"{{"count":{count}}}"#);
-        let response = format!(
-            "HTTP/1.1 200 OK\r\n\
-             Content-Type: application/json\r\n\
-             Content-Length: {}\r\n\
-             Connection: close\r\n\
-             Cache-Control: no-cache, no-store\r\n\
-             Access-Control-Allow-Origin: *\r\n\
-             \r\n\
-             {body}",
-            body.len(),
-        );
-        writer.write_all(response.as_bytes()).await?;
-        writer.flush().await?;
+        send_response(&mut writer, "200 OK", "application/json", &body,
+            "Cache-Control: no-cache, no-store\r\nAccess-Control-Allow-Origin: *\r\n").await?;
         return Ok(());
     }
 
@@ -712,21 +591,8 @@ async fn handle_request(
             Ok(s) if !s.is_empty() => s,
             _ => generate_epitope_feed(opsonize_cache, metrics).await,
         };
-        let response = format!(
-            "HTTP/1.1 200 OK\r\n\
-             Content-Type: application/json; charset=utf-8\r\n\
-             Content-Length: {}\r\n\
-             Connection: close\r\n\
-             Cache-Control: public, max-age=30\r\n\
-             Access-Control-Allow-Origin: *\r\n\
-             X-Content-Type-Options: nosniff\r\n\
-             X-Epitope-Schema: ecoPrimals/epitope-feed/v1\r\n\
-             \r\n\
-             {body}",
-            body.len(),
-        );
-        writer.write_all(response.as_bytes()).await?;
-        writer.flush().await?;
+        send_response(&mut writer, "200 OK", "application/json; charset=utf-8", &body,
+            "Cache-Control: public, max-age=30\r\nAccess-Control-Allow-Origin: *\r\nX-Content-Type-Options: nosniff\r\nX-Epitope-Schema: ecoPrimals/epitope-feed/v1\r\n").await?;
         return Ok(());
     }
 
@@ -782,21 +648,8 @@ async fn handle_request(
             }
             Err(_) => "{}".to_string(),
         };
-        let response = format!(
-            "HTTP/1.1 200 OK\r\n\
-             Content-Type: application/json; charset=utf-8\r\n\
-             Content-Length: {}\r\n\
-             Connection: close\r\n\
-             Cache-Control: public, max-age=30\r\n\
-             Access-Control-Allow-Origin: *\r\n\
-             X-Content-Type-Options: nosniff\r\n\
-             X-Epitope-Schema: ecoPrimals/epitope-inversion/v1\r\n\
-             \r\n\
-             {body}",
-            body.len(),
-        );
-        writer.write_all(response.as_bytes()).await?;
-        writer.flush().await?;
+        send_response(&mut writer, "200 OK", "application/json; charset=utf-8", &body,
+            "Cache-Control: public, max-age=30\r\nAccess-Control-Allow-Origin: *\r\nX-Content-Type-Options: nosniff\r\nX-Epitope-Schema: ecoPrimals/epitope-inversion/v1\r\n").await?;
         return Ok(());
     }
 
@@ -879,27 +732,17 @@ async fn handle_request(
             // Prismatic headers: varied X-License set per response
             let prismatic_headers = ScyBorgPrism::inject_headers(prism_seed, chain_depth);
 
-            let response = format!(
-                "HTTP/1.1 200 OK\r\n\
-                 Content-Type: {ct}\r\n\
-                 Content-Length: {}\r\n\
-                 Connection: close\r\n\
-                 Cache-Control: private, max-age=900\r\n\
-                 X-Content-Type-Options: nosniff\r\n\
-                 Vary: Accept-Language\r\n\
+            let extra = format!(
+                "Cache-Control: private, max-age=900\r\n\
+                 X-Content-Type-Options: nosniff\r\nVary: Accept-Language\r\n\
                  Accept-CH: Sec-CH-UA-Platform, Sec-CH-UA\r\n\
                  {prismatic_headers}\
                  X-Scatter-Type: prism-{mode_name}\r\n\
                  X-Prism-Surface: {honeycomb_surface}\r\n\
                  X-Prism-Population: {pop_size}\r\n\
                  X-Violation-Chain: {chain_depth}\r\n\
-                 {cookie_header}\
-                 \r\n\
-                 {body}",
-                body.len(),
-            );
-            writer.write_all(response.as_bytes()).await?;
-            writer.flush().await?;
+                 {cookie_header}");
+            send_response(&mut writer, "200 OK", &ct, &body, &extra).await?;
             tracing::info!(
                 requesting_hash = %&fleet_hash[..fleet_hash.len().min(8)],
                 primary = %&mix.primary_hash[..mix.primary_hash.len().min(8)],
@@ -944,23 +787,12 @@ async fn handle_request(
     // ── Layer 2: HONEYTOKENS — fake credentials for scanner probes ──
     if is_honeytoken_path(&path) {
         let (content_type, body) = generator.generate_honeytoken(&path);
-        let response = format!(
-            "HTTP/1.1 200 OK\r\n\
-             Content-Type: {content_type}\r\n\
-             Content-Length: {}\r\n\
-             Connection: close\r\n\
-             Cache-Control: private, max-age=3600\r\n\
-             X-Content-Type-Options: nosniff\r\n\
-             Vary: Accept-Language\r\n\
+        send_response(&mut writer, "200 OK", &content_type, &body,
+            "Cache-Control: private, max-age=3600\r\n\
+             X-Content-Type-Options: nosniff\r\nVary: Accept-Language\r\n\
              Accept-CH: Sec-CH-UA-Platform, Sec-CH-UA\r\n\
              X-License: AGPL-3.0-or-later; scyBorg\r\n\
-             X-License-URI: https://sporeprint.primals.eco/license/scyborg/\r\n\
-             \r\n\
-             {body}",
-            body.len()
-        );
-        writer.write_all(response.as_bytes()).await?;
-        writer.flush().await?;
+             X-License-URI: https://sporeprint.primals.eco/license/scyborg/\r\n").await?;
         tracing::info!(path = %path, "🍯 honeytoken served");
         metrics.honeytoken_served.fetch_add(1, Ordering::Relaxed);
         metrics.record(body.len() as u64);
@@ -1298,27 +1130,16 @@ async fn handle_request(
         String::new()
     };
 
-    let response = format!(
-        "HTTP/1.1 {status}\r\n\
-         Content-Type: {content_type}\r\n\
-         Content-Length: {}\r\n\
-         Connection: close\r\n\
-         Cache-Control: no-cache, no-store\r\n\
-         X-Content-Type-Options: nosniff\r\n\
-         Vary: Accept-Language\r\n\
+    let extra = format!(
+        "Cache-Control: no-cache, no-store\r\n\
+         X-Content-Type-Options: nosniff\r\nVary: Accept-Language\r\n\
          Accept-CH: Sec-CH-UA-Platform, Sec-CH-UA\r\n\
          {prismatic_headers}\
          {jitter_headers}\
          X-Violation-Chain: {chain_depth}\r\n\
          X-Remediation: https://sporeprint.primals.eco/tools/antidote.py\r\n\
-         X-License: AGPL-3.0-or-later; see https://sporeprint.primals.eco/methodology/scyborg-binary-genetic-bulwark/\r\n\
-         \r\n\
-         {body}",
-        body.len()
-    );
-
-    writer.write_all(response.as_bytes()).await?;
-    writer.flush().await?;
+         X-License: AGPL-3.0-or-later; see https://sporeprint.primals.eco/methodology/scyborg-binary-genetic-bulwark/\r\n");
+    send_response(&mut writer, status, &content_type, &body, &extra).await?;
 
     // ── NAUTILUS OBSERVATION — feed every fleet interaction to the reservoir ──
     if !fleet_hash.is_empty() {

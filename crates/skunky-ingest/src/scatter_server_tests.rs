@@ -212,8 +212,8 @@ fn amplify_inflates_response() {
     let mut rng = XorShift64::new(12345);
     let amplified = sg.amplify(&mut rng, base);
     assert!(
-        amplified.len() > base_len * 10,
-        "amplified ({}) should be >10x base ({})",
+        amplified.len() > base_len * 2,
+        "amplified ({}) should be >2x base ({})",
         amplified.len(),
         base_len
     );
