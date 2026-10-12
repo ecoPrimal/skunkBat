@@ -788,6 +788,11 @@ async fn run(cli: Cli) -> Result<(), IngestError> {
         tracing::info!("🗺️ topology writer final flush — culture preserved");
     }
 
+    // Wire conservation flip data from topology → dashboard (Wave 176).
+    if let (Some(tw), Some(dw)) = (&topology_writer, &mut dashboard_writer) {
+        dw.set_epitope_flip(tw.epitope_flip_data());
+    }
+
     // Flush dashboard — final write + culture save before shutdown.
     if let Some(ref mut dw) = dashboard_writer {
         dw.flush();

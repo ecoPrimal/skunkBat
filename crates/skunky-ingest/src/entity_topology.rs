@@ -306,6 +306,9 @@ pub struct TopologyWriter {
     history: Vec<EpitopeSortSnapshot>,
     /// Path to write the rolling epitope-history.json.
     history_path: PathBuf,
+    /// Latest conservation result (Experiment 4, Paper 74).
+    /// Wired into NullDimension via EpitopeFlipData.
+    last_conservation: Option<crate::epitope_conservation::ConservationResult>,
 }
 
 impl TopologyWriter {
@@ -343,6 +346,7 @@ impl TopologyWriter {
             registry,
             history,
             history_path,
+            last_conservation: None,
         };
         tracing::info!(
             output = %state.output_path.display(),
@@ -365,6 +369,23 @@ impl TopologyWriter {
         if self.ingest_count % self.flush_interval == 0 {
             self.flush();
         }
+    }
+
+    /// Get the latest epitope flip data for NullDimension computation.
+    /// Returns None if no conservation comparison has been done yet.
+    pub fn epitope_flip_data(&self) -> Option<crate::sort_compression::EpitopeFlipData> {
+        let result = self.last_conservation.as_ref()?;
+        // Aggregate per-epitope flip counts across all matched entities.
+        let mut flipped = [0usize; 6];
+        let mut evaluated = [0usize; 6];
+        for entity in &result.entities {
+            for i in 0..6 {
+                let bit = (entity.flipped_mask >> i) & 1;
+                if bit == 1 { flipped[i] += 1; }
+                evaluated[i] += 1;
+            }
+        }
+        Some(crate::sort_compression::EpitopeFlipData { flipped, evaluated })
     }
 
     /// Force a topology snapshot and write to disk.
@@ -639,6 +660,7 @@ impl TopologyWriter {
                     gap_secs = result.gap_secs,
                     "🧭 Exp4 conservation (Paper 74: compass stability)"
                 );
+                self.last_conservation = Some(result);
             }
         }
 

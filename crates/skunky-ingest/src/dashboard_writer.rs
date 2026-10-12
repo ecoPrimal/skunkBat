@@ -96,6 +96,9 @@ pub struct DashboardWriter {
     anderson_profile: crate::anderson_bridge::SharedAndersonProfile,
     /// Announce Anderson profile to squirrel AI coordination primal.
     squirrel_announce: bool,
+    /// Latest epitope flip data from topology conservation analysis.
+    /// Wired into NullDimension::compute() for VDJ classification.
+    epitope_flip: Option<crate::sort_compression::EpitopeFlipData>,
 }
 
 impl DashboardWriter {
@@ -130,6 +133,7 @@ impl DashboardWriter {
             registry,
             anderson_profile,
             squirrel_announce,
+            epitope_flip: None,
         };
         tracing::info!(
             output = %writer.output_path.display(),
@@ -140,6 +144,11 @@ impl DashboardWriter {
             "📊 dashboard writer loaded"
         );
         writer
+    }
+
+    /// Set the latest epitope flip data from topology conservation analysis.
+    pub fn set_epitope_flip(&mut self, flip: Option<crate::sort_compression::EpitopeFlipData>) {
+        self.epitope_flip = flip;
     }
 
     fn load_culture(path: &Path) -> DashboardCulture {
@@ -658,7 +667,7 @@ impl DashboardWriter {
         let null_dim = crate::sort_compression::NullDimension::compute(
             (tense_is, tense_was, tense_willbe),
             self.culture.ips.len(),
-            None, // TODO(Wave 175b): wire conservation flip data from topology
+            self.epitope_flip.as_ref(), // Wave 176: wired from topology conservation
         );
         let r6 = |v: f64| (v * 1_000_000.0).round() / 1_000_000.0;
         let null_dimension = serde_json::json!({
