@@ -371,17 +371,32 @@ impl TopologyWriter {
         }
     }
 
-    /// Get the latest epitope flip data for NullDimension computation.
-    /// Returns None if no conservation comparison has been done yet.
+    /// Get epitope flip data for NullDimension VDJ classification.
+    ///
+    /// Multi-scale: uses the LONGEST available timescale from history, not
+    /// just the 30-second inter-flush delta. A mature system has conservation=1.0
+    /// at short timescales (all epitopes are J). But over hours/days, entities
+    /// appear, disappear, and shift — revealing which epitopes are truly Variable
+    /// vs Diversity vs Joining.
+    ///
+    /// Falls back to short-scale conservation if history is too shallow.
     pub fn epitope_flip_data(&self) -> Option<crate::sort_compression::EpitopeFlipData> {
+        // Try long-scale first (evolutionary timescale)
+        if let Some(long) = self.long_scale_flip_data() {
+            return Some(long);
+        }
+        // Fall back to short-scale (30-second conservation)
+        self.short_scale_flip_data()
+    }
+
+    /// Short-scale flip data: consecutive level-0 snapshots (~30s).
+    /// Used for compass stability (Experiment 4) and as fallback.
+    fn short_scale_flip_data(&self) -> Option<crate::sort_compression::EpitopeFlipData> {
         let result = self.last_conservation.as_ref()?;
-        // Aggregate per-epitope flip counts across all matched entities.
         let mut flipped = [0usize; 6];
         let mut evaluated = [0usize; 6];
         for entity in &result.entities {
             for i in 0..6 {
-                // Only count as evaluated if both t0 and t1 had a real value
-                // (0x01 or 0x02, not 0x00 = unevaluated)
                 let t0_eval = entity.sort_key_t0[i] != 0x00;
                 let t1_eval = entity.sort_key_t1[i] != 0x00;
                 if t0_eval && t1_eval {
@@ -395,6 +410,81 @@ impl TopologyWriter {
             flipped,
             evaluated,
             matched: result.matched_entities,
+        })
+    }
+
+    /// Long-scale flip data: compare oldest and newest snapshots.
+    ///
+    /// At evolutionary timescale, entities that appeared recently won't match
+    /// the oldest snapshot (they're D — diversity). Entities that changed
+    /// their sort key over hours are V (variable). Entities present in both
+    /// with same sort key are J (joining/conserved).
+    ///
+    /// Requires at least 10 snapshots (≥ ~5 minutes of history).
+    fn long_scale_flip_data(&self) -> Option<crate::sort_compression::EpitopeFlipData> {
+        if self.history.len() < 10 {
+            return None;
+        }
+
+        let oldest = self.history.first()?;
+        let newest = self.history.last()?;
+
+        // Need meaningful time separation (at least 2 minutes)
+        let gap = newest.ts.saturating_sub(oldest.ts);
+        if gap < 120 {
+            return None;
+        }
+
+        let result = crate::epitope_conservation::epitope_conservation(oldest, newest);
+
+        // Count entities in newest but NOT in oldest — these are "new arrivals"
+        // and represent Diversity (not yet fully observed at evolutionary timescale)
+        let oldest_entities: std::collections::HashSet<&str> = oldest.entities
+            .iter()
+            .map(|e| e.entity.as_str())
+            .collect();
+        let new_arrivals = newest.entities.iter()
+            .filter(|e| !oldest_entities.contains(e.entity.as_str()))
+            .count();
+
+        let mut flipped = [0usize; 6];
+        let mut evaluated = [0usize; 6];
+
+        // Matched entities: compare their long-scale evolution
+        for entity in &result.entities {
+            for i in 0..6 {
+                let t0_eval = entity.sort_key_t0[i] != 0x00;
+                let t1_eval = entity.sort_key_t1[i] != 0x00;
+                if t0_eval && t1_eval {
+                    evaluated[i] += 1;
+                    let bit = (entity.flipped_mask >> i) & 1;
+                    if bit == 1 { flipped[i] += 1; }
+                }
+            }
+        }
+
+        // New arrivals contribute to the "not evaluated" pool — they lower
+        // eval_rate for epitopes, pushing those epitopes toward D (Diversity).
+        // This is correct: an epitope that new entities don't have data for
+        // IS diversity — it's potential not yet expressed.
+        let total_matched = result.matched_entities + new_arrivals;
+
+        if total_matched == 0 {
+            return None;
+        }
+
+        tracing::debug!(
+            gap_secs = gap,
+            matched = result.matched_entities,
+            new_arrivals = new_arrivals,
+            mean_hamming = format!("{:.3}", result.mean_hamming).as_str(),
+            "🧬 long-scale VDJ conservation (evolutionary timescale)"
+        );
+
+        Some(crate::sort_compression::EpitopeFlipData {
+            flipped,
+            evaluated,
+            matched: total_matched,
         })
     }
 
