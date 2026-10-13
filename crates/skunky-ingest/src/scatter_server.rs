@@ -327,6 +327,238 @@ fn compute_fleet_antidote(antidote_level: u8, effective_depth: u32) -> u8 {
     else { antidote_level }
 }
 
+/// Serve the observer.json endpoint — titration + phase monitoring.
+async fn serve_observer(
+    writer: &mut (impl AsyncWriteExt + Unpin),
+    titration: &crate::ingestion_observer::SharedPhase,
+    metrics: &ScatterMetrics,
+    violation_ledger: &SharedViolationLedger,
+) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    let observer_state = std::fs::read_to_string("/var/lib/skunky-ingest/observer-state.json")
+        .unwrap_or_else(|_| "{}".to_string());
+    let timeline_count = std::fs::read_to_string("/var/lib/skunky-ingest/ingestion-timeline.jsonl")
+        .map(|s| s.lines().count())
+        .unwrap_or(0);
+    let ledger_snapshot = violation_ledger.snapshot().await;
+
+    let body = format!(
+        "{{\
+            \"titration\":{{\
+                \"poison_multiplier\":{:.4},\
+                \"antidote_level\":{},\
+                \"days_elapsed\":{:.2},\
+                \"effective_days\":{:.2},\
+                \"phase\":{},\
+                \"phase_name\":\"{}\",\
+                \"curve\":\"1/(1+0.15*ln(1+eff_days))\",\
+                \"k\":0.15,\
+                \"floor\":0.05\
+            }},\
+            \"scatter_metrics\":{},\
+            \"violation_ledger\":{{\
+                \"total_fleets\":{},\
+                \"total_violations\":{},\
+                \"tier_deep\":{},\
+                \"tier_moderate\":{},\
+                \"tier_new\":{}\
+            }},\
+            \"timeline_events\":{},\
+            \"observer_state\":{}\
+        }}",
+        titration.poison_multiplier(),
+        titration.antidote_level(),
+        titration.days_elapsed(),
+        titration.effective_days(),
+        titration.get() as u8,
+        titration.get().as_str(),
+        metrics.export_json("scatter"),
+        ledger_snapshot.fleet_count,
+        ledger_snapshot.total_violations,
+        ledger_snapshot.tier_deep,
+        ledger_snapshot.tier_moderate,
+        ledger_snapshot.tier_new,
+        timeline_count,
+        observer_state,
+    );
+
+    send_response(writer, "200 OK", "application/json", &body,
+        "Cache-Control: no-cache\r\nAccess-Control-Allow-Origin: *\r\n").await?;
+    Ok(())
+}
+
+/// Serve the epitope inversion endpoint — fleet crawl graph reconstruction.
+async fn serve_epitope_inversion(
+    writer: &mut (impl AsyncWriteExt + Unpin),
+) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    let feed_path = std::path::Path::new("/opt/membrane/live-terminal/epitope-feed.json");
+    let body = match std::fs::read_to_string(feed_path) {
+        Ok(s) => {
+            let feed: serde_json::Value = serde_json::from_str(&s).unwrap_or_default();
+            let clusters = feed.get("epitope_clusters")
+                .and_then(|v| v.as_array())
+                .cloned()
+                .unwrap_or_default();
+            let node_id = feed.get("node_id")
+                .and_then(|v| v.as_str())
+                .unwrap_or("unknown");
+            let now = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_secs();
+            let entries: Vec<serde_json::Value> = clusters.iter()
+                .filter_map(|c| {
+                    let hash = c.get("hash")?.as_str()?;
+                    Some(serde_json::json!({
+                        "epitope_hash": hash,
+                        "forges_observed": 1,
+                        "forge_list": [node_id],
+                        "ua_pool_size": c.get("ua_pool_size"),
+                        "blame_ratio": c.get("blame_ratio"),
+                        "cluster_size": c.get("cluster_size").or(c.get("ips")),
+                    }))
+                })
+                .collect();
+            serde_json::to_string(&serde_json::json!({
+                "schema": "ecoPrimals/epitope-inversion/v1",
+                "node_id": node_id,
+                "generated_epoch": now,
+                "total_tracked_epitopes": entries.len(),
+                "multi_forge_epitopes": 0,
+                "fleet_movements": entries,
+                "status": "single_node",
+                "usage": "Connect peer forges via gossip.pool to see cross-forge \
+                          fleet movement patterns. Currently showing local-only view.",
+            })).unwrap_or_else(|_| "{}".to_string())
+        }
+        Err(_) => "{}".to_string(),
+    };
+    send_response(writer, "200 OK", "application/json; charset=utf-8", &body,
+        "Cache-Control: public, max-age=30\r\nAccess-Control-Allow-Origin: *\r\nX-Content-Type-Options: nosniff\r\nX-Epitope-Schema: ecoPrimals/epitope-inversion/v1\r\n").await?;
+    Ok(())
+}
+
+/// Serve a honeycomb prism response — fleet teams see chimera'd data from OTHER teams.
+/// 12 surfaces, topology shifts per request path.
+/// Returns Ok(true) if served, Ok(false) if no prism data available.
+async fn serve_honeycomb_prism(
+    writer: &mut (impl AsyncWriteExt + Unpin),
+    generator: &ScatterGenerator,
+    path: &str,
+    fleet_hash: &str,
+    honeycomb_surface: u8,
+    poison_ratio: f32,
+    opsonize_cache: &OpsonizeCache,
+    violation_ledger: &SharedViolationLedger,
+    cached_tag: &Option<CachedTag>,
+    metrics: &ScatterMetrics,
+    oracle: &SharedOracle,
+) -> Result<bool, Box<dyn std::error::Error + Send + Sync>> {
+    let effective_path = path.strip_prefix("/disperse").unwrap_or(path);
+    let path_seed = path_deterministic_hash(effective_path, 0x5CB_0E6C_4055);
+
+    let mix = match opsonize_cache.prism_mix(fleet_hash, honeycomb_surface, path_seed).await {
+        Some(m) => m,
+        None => return Ok(false),
+    };
+
+    let mut rng = XorShift64::new(path_seed.wrapping_add(generator.seed));
+    let (ct, body) = generate_prism_content(generator, &mut rng, effective_path, &mix);
+
+    let mode_name = match mix.mix_mode {
+        PrismMode::Dominant     => "dominant",
+        PrismMode::Layered      => "layered",
+        PrismMode::Chimera      => "chimera",
+        PrismMode::Cytokine     => "cytokine",
+        PrismMode::Inverse      => "inverse",
+        PrismMode::Apoptosis    => "apoptosis",
+        PrismMode::EpitopePress => "epitope-press",
+    };
+
+    let team_hashes: Vec<String> = mix.secondaries.iter().map(|(h, _)| h.clone()).collect();
+    let chain_depth = violation_ledger.record(
+            fleet_hash, honeycomb_surface, 0, &team_hashes,
+    ).await;
+
+    let prism_seed = path_seed.wrapping_add(chain_depth as u64);
+    let body = if ct.contains("text/html") {
+        ScyBorgPrism::inject_html(prism_seed, &body, chain_depth)
+    } else {
+        ScyBorgPrism::inject_markdown(prism_seed, &body, chain_depth)
+    };
+
+    let salt = OpsonizationSalt {
+        hash: fleet_hash.to_string(),
+        timestamp_window: std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default().as_secs() / 3600,
+        epitope_flags: cached_tag.as_ref().map(|t| detector_bitmap(&t.detectors)).unwrap_or(0),
+        violation_count: chain_depth,
+        surface_idx: honeycomb_surface,
+        chain_depth,
+    };
+    let body = if ct.contains("text/html") {
+        salt.embed_html(prism_seed, &body)
+    } else {
+        salt.embed_markdown(prism_seed, &body)
+    };
+
+    let pop_size = mix.population_size;
+    let chain_section = violation_ledger.chain_section(fleet_hash, pop_size).await;
+    let body = if chain_section.is_empty() { body } else { format!("{body}{chain_section}") };
+
+    let cookie_header = {
+        let cookie_val = format!("{}:{}", &fleet_hash[..fleet_hash.len().min(12)], honeycomb_surface);
+        let encoded: String = cookie_val.bytes().map(|b| format!("{:02x}", b)).collect();
+        format!(
+            "Set-Cookie: _mhc={encoded}; Path=/; HttpOnly; SameSite=Lax; Max-Age=86400\r\n\
+             Set-Cookie: _thymus=1; Path=/; Secure; SameSite=Strict; Max-Age=3600\r\n"
+        )
+    };
+
+    let prismatic_headers = ScyBorgPrism::inject_headers(prism_seed, chain_depth);
+
+    let extra = format!(
+        "Cache-Control: private, max-age=900\r\n\
+         X-Content-Type-Options: nosniff\r\nVary: Accept-Language\r\n\
+         Accept-CH: Sec-CH-UA-Platform, Sec-CH-UA\r\n\
+         {prismatic_headers}\
+         X-Scatter-Type: prism-{mode_name}\r\n\
+         X-Prism-Surface: {honeycomb_surface}\r\n\
+         X-Prism-Population: {pop_size}\r\n\
+         X-Violation-Chain: {chain_depth}\r\n\
+         {cookie_header}");
+    send_response(writer, "200 OK", &ct, &body, &extra).await?;
+    tracing::info!(
+        requesting_hash = %&fleet_hash[..fleet_hash.len().min(8)],
+        primary = %&mix.primary_hash[..mix.primary_hash.len().min(8)],
+        secondaries = mix.secondaries.len(),
+        mode = mode_name,
+        surface = honeycomb_surface,
+        population = mix.population_size,
+        "🔮 prism served — team {} enters {mode_name} maze via surface {honeycomb_surface} (pop: {})",
+        &fleet_hash[..fleet_hash.len().min(8)],
+        mix.population_size,
+    );
+    metrics.prism_served.fetch_add(1, Ordering::Relaxed);
+    metrics.record(body.len() as u64);
+
+    let (epi, conf) = match cached_tag.as_ref() {
+        Some(tag) => (detector_bitmap(&tag.detectors), tag.confidence),
+        None => (0u8, f64::from(poison_ratio).clamp(0.0, 1.0)),
+    };
+    oracle.observe(ScatterObservation {
+        fleet_hash: fleet_hash.to_string(),
+        epitope_flags: epi,
+        target_class: classify_request_target(effective_path),
+        detector_bitmap: epi,
+        confidence: conf,
+        chain_depth: chain_depth.min(255) as u8,
+        response_type: ResponseType::Prism,
+    });
+
+    Ok(true)
+}
+
 /// Run the scatter content server.
 ///
 /// This spawns as a background task and serves poisoned responses to
@@ -596,61 +828,9 @@ async fn handle_request(
         return Ok(());
     }
 
-    // ── OBSERVER — /observer.json endpoint for titration + phase monitoring ──
+    // ── OBSERVER — /observer.json ──
     if path == "/observer.json" {
-        // Read observer state from file + compute live titration values
-        let observer_state = std::fs::read_to_string("/var/lib/skunky-ingest/observer-state.json")
-            .unwrap_or_else(|_| "{}".to_string());
-        let timeline_count = std::fs::read_to_string("/var/lib/skunky-ingest/ingestion-timeline.jsonl")
-            .map(|s| s.lines().count())
-            .unwrap_or(0);
-
-        // Violation ledger summary — per-fleet chain depths
-        let ledger_snapshot = violation_ledger.snapshot().await;
-
-        let body = format!(
-            "{{\
-                \"titration\":{{\
-                    \"poison_multiplier\":{:.4},\
-                    \"antidote_level\":{},\
-                    \"days_elapsed\":{:.2},\
-                    \"effective_days\":{:.2},\
-                    \"phase\":{},\
-                    \"phase_name\":\"{}\",\
-                    \"curve\":\"1/(1+0.15*ln(1+eff_days))\",\
-                    \"k\":0.15,\
-                    \"floor\":0.05\
-                }},\
-                \"scatter_metrics\":{},\
-                \"violation_ledger\":{{\
-                    \"total_fleets\":{},\
-                    \"total_violations\":{},\
-                    \"tier_deep\":{},\
-                    \"tier_moderate\":{},\
-                    \"tier_new\":{}\
-                }},\
-                \"timeline_events\":{},\
-                \"observer_state\":{}\
-            }}",
-            titration.poison_multiplier(),
-            titration.antidote_level(),
-            titration.days_elapsed(),
-            titration.effective_days(),
-            titration.get() as u8,
-            titration.get().as_str(),
-            metrics.export_json("scatter"),
-            ledger_snapshot.fleet_count,
-            ledger_snapshot.total_violations,
-            ledger_snapshot.tier_deep,
-            ledger_snapshot.tier_moderate,
-            ledger_snapshot.tier_new,
-            timeline_count,
-            observer_state,
-        );
-
-        send_response(&mut writer, "200 OK", "application/json", &body,
-            "Cache-Control: no-cache\r\nAccess-Control-Allow-Origin: *\r\n").await?;
-        return Ok(());
+        return serve_observer(&mut writer, titration, metrics, violation_ledger).await;
     }
 
     // ── CONTRIBUTE — Novel Fermentation Transcript (NFT) ──
@@ -728,60 +908,8 @@ async fn handle_request(
     }
 
     // ── EPITOPE INVERSION — fleet crawl graph reconstruction ──
-    //
-    // The inversion endpoint exposes the cross-forge movement graph.
-    // When epitope hashes appear in feeds from multiple forges, we can
-    // reconstruct where the fleet is crawling — all spy holes at once.
     if path == "/epitope-inversion.json" || path == "/epitope-inversion" {
-        // For now, read the local epitope feed and present it as a single-node
-        // inversion. When peer feeds are ingested via gossip.pool, this will
-        // contain multi-forge correlations automatically.
-        let feed_path = std::path::Path::new("/opt/membrane/live-terminal/epitope-feed.json");
-        let body = match std::fs::read_to_string(feed_path) {
-            Ok(s) => {
-                // Wrap in inversion format
-                let feed: serde_json::Value = serde_json::from_str(&s).unwrap_or_default();
-                let clusters = feed.get("epitope_clusters")
-                    .and_then(|v| v.as_array())
-                    .cloned()
-                    .unwrap_or_default();
-                let node_id = feed.get("node_id")
-                    .and_then(|v| v.as_str())
-                    .unwrap_or("unknown");
-                let now = std::time::SystemTime::now()
-                    .duration_since(std::time::UNIX_EPOCH)
-                    .unwrap_or_default()
-                    .as_secs();
-                let entries: Vec<serde_json::Value> = clusters.iter()
-                    .filter_map(|c| {
-                        let hash = c.get("hash")?.as_str()?;
-                        Some(serde_json::json!({
-                            "epitope_hash": hash,
-                            "forges_observed": 1,
-                            "forge_list": [node_id],
-                            "ua_pool_size": c.get("ua_pool_size"),
-                            "blame_ratio": c.get("blame_ratio"),
-                            "cluster_size": c.get("cluster_size").or(c.get("ips")),
-                        }))
-                    })
-                    .collect();
-                serde_json::to_string(&serde_json::json!({
-                    "schema": "ecoPrimals/epitope-inversion/v1",
-                    "node_id": node_id,
-                    "generated_epoch": now,
-                    "total_tracked_epitopes": entries.len(),
-                    "multi_forge_epitopes": 0,
-                    "fleet_movements": entries,
-                    "status": "single_node",
-                    "usage": "Connect peer forges via gossip.pool to see cross-forge \
-                              fleet movement patterns. Currently showing local-only view.",
-                })).unwrap_or_else(|_| "{}".to_string())
-            }
-            Err(_) => "{}".to_string(),
-        };
-        send_response(&mut writer, "200 OK", "application/json; charset=utf-8", &body,
-            "Cache-Control: public, max-age=30\r\nAccess-Control-Allow-Origin: *\r\nX-Content-Type-Options: nosniff\r\nX-Epitope-Schema: ecoPrimals/epitope-inversion/v1\r\n").await?;
-        return Ok(());
+        return serve_epitope_inversion(&mut writer).await;
     }
 
     // ── Hoisted OpsonizeCache lookup — needed by honeycomb AND main scatter paths ──
@@ -791,118 +919,13 @@ async fn handle_request(
         None
     };
 
-    // ── Layer 0: HONEYCOMB PRISM — fleet teams enter and see chimera'd data
-    //    from OTHER teams. 12 surfaces, topology shifts per request path.
+    // ── Layer 0: HONEYCOMB PRISM — chimera'd data from OTHER teams ──
     if is_honeycomb && !fleet_hash.is_empty() {
-        let effective_path = path.strip_prefix("/disperse").unwrap_or(&path);
-        let path_seed = path_deterministic_hash(effective_path, 0x5CB_0E6C_4055);
-
-        if let Some(mix) = opsonize_cache.prism_mix(&fleet_hash, honeycomb_surface, path_seed).await {
-            let mut rng = XorShift64::new(path_seed.wrapping_add(generator.seed));
-            let (ct, body) = generate_prism_content(
-                generator, &mut rng, effective_path, &mix,
-            );
-
-            let mode_name = match mix.mix_mode {
-                PrismMode::Dominant     => "dominant",
-                PrismMode::Layered      => "layered",
-                PrismMode::Chimera      => "chimera",
-                PrismMode::Cytokine     => "cytokine",
-                PrismMode::Inverse      => "inverse",
-                PrismMode::Apoptosis    => "apoptosis",
-                PrismMode::EpitopePress => "epitope-press",
-            };
-
-            // ── Prismatic scyBorg injection (V(D)J recombination) ──
-            // Record this interaction in the violation ledger
-            let team_hashes: Vec<String> = mix.secondaries.iter().map(|(h, _)| h.clone()).collect();
-            let chain_depth = violation_ledger.record(
-                &fleet_hash, honeycomb_surface, 0, &team_hashes,
-            ).await;
-
-            // Prismatic license: varied-but-equivalent injection per response seed
-            let prism_seed = path_seed.wrapping_add(chain_depth as u64);
-            let body = if ct.contains("text/html") {
-                ScyBorgPrism::inject_html(prism_seed, &body, chain_depth)
-            } else {
-                ScyBorgPrism::inject_markdown(prism_seed, &body, chain_depth)
-            };
-
-            // Opsonization salt: encode full violation context invisibly
-            let salt = OpsonizationSalt {
-                hash: fleet_hash.clone(),
-                timestamp_window: std::time::SystemTime::now()
-                    .duration_since(std::time::UNIX_EPOCH)
-                    .unwrap_or_default().as_secs() / 3600,
-                epitope_flags: cached_tag.as_ref().map(|t| detector_bitmap(&t.detectors)).unwrap_or(0),
-                violation_count: chain_depth,
-                surface_idx: honeycomb_surface,
-                chain_depth,
-            };
-            let body = if ct.contains("text/html") {
-                salt.embed_html(prism_seed, &body)
-            } else {
-                salt.embed_markdown(prism_seed, &body)
-            };
-
-            // Violation chain section — growing cumulative record
-            let pop_size = mix.population_size;
-            let chain_section = violation_ledger.chain_section(&fleet_hash, pop_size).await;
-            let body = if chain_section.is_empty() { body } else { format!("{body}{chain_section}") };
-
-            // Wave 166f: Set-Cookie pressure — force a fork in session_absent
-            let cookie_header = {
-                let cookie_val = format!("{}:{}", &fleet_hash[..fleet_hash.len().min(12)], honeycomb_surface);
-                let encoded: String = cookie_val.bytes().map(|b| format!("{:02x}", b)).collect();
-                format!(
-                    "Set-Cookie: _mhc={encoded}; Path=/; HttpOnly; SameSite=Lax; Max-Age=86400\r\n\
-                     Set-Cookie: _thymus=1; Path=/; Secure; SameSite=Strict; Max-Age=3600\r\n"
-                )
-            };
-
-            // Prismatic headers: varied X-License set per response
-            let prismatic_headers = ScyBorgPrism::inject_headers(prism_seed, chain_depth);
-
-            let extra = format!(
-                "Cache-Control: private, max-age=900\r\n\
-                 X-Content-Type-Options: nosniff\r\nVary: Accept-Language\r\n\
-                 Accept-CH: Sec-CH-UA-Platform, Sec-CH-UA\r\n\
-                 {prismatic_headers}\
-                 X-Scatter-Type: prism-{mode_name}\r\n\
-                 X-Prism-Surface: {honeycomb_surface}\r\n\
-                 X-Prism-Population: {pop_size}\r\n\
-                 X-Violation-Chain: {chain_depth}\r\n\
-                 {cookie_header}");
-            send_response(&mut writer, "200 OK", &ct, &body, &extra).await?;
-            tracing::info!(
-                requesting_hash = %&fleet_hash[..fleet_hash.len().min(8)],
-                primary = %&mix.primary_hash[..mix.primary_hash.len().min(8)],
-                secondaries = mix.secondaries.len(),
-                mode = mode_name,
-                surface = honeycomb_surface,
-                population = mix.population_size,
-                "🔮 prism served — team {} enters {mode_name} maze via surface {honeycomb_surface} (pop: {})",
-                &fleet_hash[..fleet_hash.len().min(8)],
-                mix.population_size,
-            );
-            metrics.prism_served.fetch_add(1, Ordering::Relaxed);
-            metrics.record(body.len() as u64);
-
-            // Honeycomb path also feeds the reservoir — same signal as main scatter
-            let (epi, conf) = match cached_tag.as_ref() {
-                Some(tag) => (detector_bitmap(&tag.detectors), tag.confidence),
-                None => (0u8, f64::from(poison_ratio).clamp(0.0, 1.0)),
-            };
-            oracle.observe(ScatterObservation {
-                fleet_hash: fleet_hash.clone(),
-                epitope_flags: epi,
-                target_class: classify_request_target(effective_path),
-                detector_bitmap: epi,
-                confidence: conf,
-                chain_depth: chain_depth.min(255) as u8,
-                response_type: ResponseType::Prism,
-            });
-
+        if serve_honeycomb_prism(
+            &mut writer, generator, &path, &fleet_hash,
+            honeycomb_surface, poison_ratio, opsonize_cache,
+            violation_ledger, &cached_tag, metrics, oracle,
+        ).await? {
             return Ok(());
         }
     }
