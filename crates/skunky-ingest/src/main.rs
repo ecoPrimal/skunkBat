@@ -12,7 +12,7 @@
 use skunky_ingest::{
     aggregator, anderson_bridge, bloom_emitter, caddy_bridge, cloudflare, cursor,
     dashboard_writer, entity_classifier, epitope_registry, error, federation, fleet,
-    inflammatory, ingestion_observer, lysogeny, membrane_stack,
+    inflammatory, ingestion_observer, lysogeny, membrane_stack, ntfy_bridge, pulse_writer,
     rpc, abuse_reporter, bloom_sensor, scatter_server, signal_spine,
     threat_feed,
 };
@@ -215,6 +215,24 @@ struct Cli {
     /// Membrane stack observer interval in seconds (default: 5 minutes).
     #[arg(long, default_value_t = 300)]
     membrane_stack_interval_secs: u64,
+
+    /// Enable pulse writer — replaces pulse-pollen.py cron.
+    /// Writes ban-pulse.json and pollen.json every pulse_writer_interval_secs.
+    #[arg(long, default_value_t = false)]
+    pulse_writer: bool,
+
+    /// Pulse writer interval in seconds (default: 2 minutes).
+    #[arg(long, default_value_t = 120)]
+    pulse_writer_interval_secs: u64,
+
+    /// Enable ntfy bridge — replaces neutron-notify-bridge.py cron.
+    /// Polls ntfy topic and bridges messages into neutron inbox.
+    #[arg(long, default_value_t = false)]
+    ntfy_bridge: bool,
+
+    /// Ntfy bridge poll interval in seconds (default: 5 minutes).
+    #[arg(long, default_value_t = 300)]
+    ntfy_bridge_interval_secs: u64,
 }
 
 #[tokio::main]
@@ -479,6 +497,38 @@ async fn run(cli: Cli) -> Result<(), IngestError> {
         tokio::spawn(async move {
             let config = membrane_stack::MembraneStackConfig::default();
             membrane_stack::breathe_loop(config, interval).await;
+        });
+    }
+
+    // Pulse writer — replaces pulse-pollen.py (Wave 182)
+    if cli.pulse_writer {
+        let interval = cli.pulse_writer_interval_secs;
+        tracing::info!(
+            interval_secs = interval,
+            "🌼 pulse writer active — replaces pulse-pollen.py"
+        );
+        tokio::spawn(async move {
+            let config = pulse_writer::PulseWriterConfig {
+                interval_secs: interval,
+                ..Default::default()
+            };
+            pulse_writer::pulse_loop(config).await;
+        });
+    }
+
+    // Ntfy bridge — replaces neutron-notify-bridge.py (Wave 182)
+    if cli.ntfy_bridge {
+        let interval = cli.ntfy_bridge_interval_secs;
+        tracing::info!(
+            interval_secs = interval,
+            "📨 ntfy bridge active — replaces neutron-notify-bridge.py"
+        );
+        tokio::spawn(async move {
+            let config = ntfy_bridge::NtfyBridgeConfig {
+                interval_secs: interval,
+                ..Default::default()
+            };
+            ntfy_bridge::bridge_loop(config).await;
         });
     }
 

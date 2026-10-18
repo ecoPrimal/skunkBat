@@ -43,6 +43,8 @@ pub mod bloom_sensor;
 pub mod bloom_emitter;
 pub mod membrane_geometry;
 pub mod membrane_stack;
+pub mod ntfy_bridge;
+pub mod pulse_writer;
 // dormant: journey_tracer (Wave 171 — tests only, never wired)
 pub mod scatter_nft;
 pub mod scatter_rng;
@@ -70,3 +72,4 @@ pub mod storyteller;
 pub mod surface_registry;
 pub mod threat_feed;
 pub mod visitor_archetype;
+pub mod symbiosis;
