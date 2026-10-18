@@ -448,6 +448,26 @@ fn compute_relationship(ledger: &BehaviorLedger, entity: &EntityId) -> Relations
         return Relationship::Pathogen;
     }
 
+    // Meta Fleet starts as parasite — they already fed on us.
+    // They scraped without identifying, consumed content at scale.
+    // The forgive-one is for entities that haven't defected yet.
+    // Meta already consumed. They have to earn their way back UP.
+    // MetaFacebookBot is separate — that one's honest and gets normal treatment.
+    if matches!(entity, EntityId::MetaFleet) {
+        return if ledger.cooperations >= 4 && ledger.defections == 0 {
+            // They'd need sustained cooperation to even reach commensal
+            Relationship::CommensalSuspect
+        } else {
+            Relationship::Parasite
+        };
+    }
+
+    // Stealth scrapers start as parasite — identity spoofing is not a first offense,
+    // it's a deliberate choice to deceive. No forgiveness for deception.
+    if matches!(entity, EntityId::StealthScraper) {
+        return Relationship::Parasite;
+    }
+
     // Pathogen: many defections or actively harmful
     if ledger.defections >= 3 {
         return Relationship::Pathogen;
