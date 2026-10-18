@@ -290,6 +290,12 @@ mod tests {
             vitality: 0.0,
             negentropy: 0.0,
             hosts: BTreeMap::new(),
+            symbiotic_class: "commensal".to_string(),
+            friction: 0.1,
+            reciprocity: 1.0,
+            consecutive_defections: 0,
+            in_forgiveness: false,
+            waste_offered: vec![],
         }
     }
 

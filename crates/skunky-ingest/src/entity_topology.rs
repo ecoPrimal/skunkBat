@@ -543,6 +543,29 @@ impl TopologyWriter {
                         } else {
                             tracing::debug!("🔥 campfire JSON updated");
                         }
+
+                        // Symbiosis — tit-for-tat-forgive-one (Wave 180)
+                        // Write symbiosis.json alongside topology.json
+                        let symbiosis = crate::symbiosis::build_symbiosis(&topology.entities);
+                        let sym_path = self.output_path.parent()
+                            .unwrap_or(std::path::Path::new("."))
+                            .join("symbiosis.json");
+                        match serde_json::to_string_pretty(&symbiosis) {
+                            Ok(json) => {
+                                if let Err(e) = std::fs::write(&sym_path, &json) {
+                                    tracing::warn!(error = %e, "symbiosis.json write failed");
+                                } else {
+                                    tracing::info!(
+                                        mutualists = symbiosis.summary.mutualists,
+                                        commensal = symbiosis.summary.commensal_active,
+                                        parasites = symbiosis.summary.parasites,
+                                        pathogens = symbiosis.summary.pathogens,
+                                        "🤝 symbiosis.json updated — tit-for-tat-forgive-one"
+                                    );
+                                }
+                            }
+                            Err(e) => tracing::warn!(error = %e, "symbiosis serialization failed"),
+                        }
                     }
                     Err(e) => {
                         tracing::warn!(
