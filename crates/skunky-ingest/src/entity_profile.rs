@@ -83,6 +83,23 @@ pub struct EntityProfile {
     /// Wave 171: Per-surface request counts — which surfaces this entity visits.
     /// Keyed by hostname (e.g. "git.primals.eco", "detroit.primals.eco").
     pub hosts: BTreeMap<String, u64>,
+
+    // ── Wave 180: Symbiotic classification (tit-for-tat-forgive-one) ──
+
+    /// Symbiotic relationship classification.
+    /// The golden rule: mirror their behavior, forgive one defection.
+    pub symbiotic_class: String,
+    /// Friction level applied (0.0 = mutualist, 1.0 = pathogen).
+    pub friction: f64,
+    /// Reciprocity ratio: cooperation / (cooperation + defection).
+    pub reciprocity: f64,
+    /// Number of consecutive defections observed.
+    pub consecutive_defections: u32,
+    /// Whether this entity is in forgiveness state (first defection forgiven).
+    pub in_forgiveness: bool,
+    /// What we can offer them (waste = things they want that cost us nothing).
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub waste_offered: Vec<String>,
 }
 
 /// Seven conserved epitopes from antigenic drift analysis (Wave 166f+167).
@@ -716,6 +733,14 @@ pub(crate) fn build_profile(entity_id: EntityId, accum: EntityAccum) -> EntityPr
         score_epitopes(&accum, &intervals, &timing);
     let (negentropy, vuln_probes) = compute_negentropy(&repo_vec, accum.total);
 
+    // Wave 180: compute symbiotic classification before struct takes ownership
+    let sym_class = classify_symbiotic_from_profile(&entity_id, &epitopes, negentropy, avg_rps);
+    let sym_friction = symbiotic_friction(&entity_id, &epitopes, negentropy, avg_rps);
+    let sym_reciprocity = compute_reciprocity(&entity_id, &epitopes);
+    let sym_defections = count_defections(&entity_id, &epitopes);
+    let sym_forgiveness = is_in_forgiveness(&entity_id, &epitopes);
+    let sym_waste = compute_waste(&entity_id);
+
     EntityProfile {
         label: entity_id.label().to_string(),
         is_fleet: entity_id.is_fleet(),
@@ -760,6 +785,14 @@ pub(crate) fn build_profile(entity_id: EntityId, accum: EntityAccum) -> EntityPr
         negentropy,
         vuln_probes,
         hosts: accum.hosts.into_iter().collect(),
+
+        // Wave 180: tit-for-tat-forgive-one symbiotic classification
+        symbiotic_class: sym_class.to_string(),
+        friction: sym_friction,
+        reciprocity: sym_reciprocity,
+        consecutive_defections: sym_defections,
+        in_forgiveness: sym_forgiveness,
+        waste_offered: sym_waste,
     }
 }
 
@@ -770,6 +803,138 @@ pub(crate) fn build_profile(entity_id: EntityId, accum: EntityAccum) -> EntityPr
 
 // ── Tests ──
 
+
+// ── Wave 180: Symbiotic classification helpers ──────────────────────────
+// Tit-for-tat-forgive-one. The golden rule in code.
+// Mirror their behavior, forgive the first defection.
+
+
+/// Classify the symbiotic relationship from behavioral profile data.
+///
+/// This is the golden rule: treat them how we'd want to be treated.
+/// If they're honest and respectful → commensal (they read, we're neutral).
+/// If they contribute back → mutualist (both benefit).
+/// If they scrape aggressively with no attribution → parasite (forgive one first).
+/// If they probe for vulnerabilities → pathogen (but even they give us negentropy).
+fn classify_symbiotic_from_profile(
+    entity: &EntityId,
+    epitopes: &EpitopeScores,
+    negentropy: f64,
+    avg_rps: f64,
+) -> &'static str {
+    // Pathogen: vulnerability scanners actively harm
+    if matches!(entity, EntityId::VulnScanner) {
+        return "pathogen";
+    }
+
+    // Mutualist: honest identity + low aggression + provides useful signal
+    // Search engines index and link back. That's mutualist.
+    if matches!(entity, EntityId::GoogleBot | EntityId::MicrosoftBingBot |
+                EntityId::AppleBot | EntityId::HuaweiPetalBot) {
+        return "mutualist";
+    }
+
+    // Human browsers are always commensal — they read, we serve
+    if matches!(entity, EntityId::HumanBrowser) {
+        return "commensal";
+    }
+
+    // Honest bots that identify themselves start as commensal
+    // (forgive-one means first defection stays commensal)
+    if entity.is_honest() {
+        // But if they're aggressive (>1 RPS sustained), escalate
+        let defection_count = count_defections(entity, epitopes);
+        if defection_count >= 2 {
+            return "parasite";
+        }
+        return "commensal";
+    }
+
+    // Stealth scrapers: spoofing identity is a defection
+    if matches!(entity, EntityId::StealthScraper | EntityId::MetaFleet) {
+        // Meta: spoofs identity (no UA) + aggressive = 2 defections = parasite
+        return "parasite";
+    }
+
+    // Ghost: not enough signal, but suspicious
+    if matches!(entity, EntityId::Ghost) {
+        return "null";
+    }
+
+    // Default: not enough info
+    "null"
+}
+
+/// Friction level for an entity's symbiotic class.
+fn symbiotic_friction(
+    entity: &EntityId,
+    epitopes: &EpitopeScores,
+    negentropy: f64,
+    avg_rps: f64,
+) -> f64 {
+    match classify_symbiotic_from_profile(entity, epitopes, negentropy, avg_rps) {
+        "mutualist" => 0.0,
+        "commensal" => 0.1,
+        "parasite"  => 0.6,
+        "pathogen"  => 1.0,
+        _           => 0.3,
+    }
+}
+
+/// Reciprocity: cooperation / (cooperation + defection).
+fn compute_reciprocity(entity: &EntityId, epitopes: &EpitopeScores) -> f64 {
+    let coop: f64 = if entity.is_honest() { 1.0 } else { 0.0 }
+        + if !matches!(entity, EntityId::VulnScanner | EntityId::StealthScraper) { 1.0 } else { 0.0 };
+    let defect: f64 = count_defections(entity, epitopes) as f64;
+    if coop + defect == 0.0 { 0.5 } else { coop / (coop + defect) }
+}
+
+/// Count behavioral defections from epitope evidence.
+fn count_defections(entity: &EntityId, epitopes: &EpitopeScores) -> u32 {
+    let mut d: u32 = 0;
+    // Spoofing identity is a defection
+    if !entity.is_honest() && !matches!(entity, EntityId::Unknown | EntityId::Ghost) { d += 1; }
+    // Aggressive burst rate is a defection
+    if let Some(ref burst) = epitopes.burst_ratio {
+        if burst.triggered { d += 1; }
+    }
+    // No reading pauses (metronomic extraction) is a defection
+    if let Some(ref reading) = epitopes.reading_deficit {
+        if reading.triggered { d += 1; }
+    }
+    d
+}
+
+/// Whether this entity is in forgiveness state.
+fn is_in_forgiveness(entity: &EntityId, epitopes: &EpitopeScores) -> bool {
+    let d = count_defections(entity, epitopes);
+    d == 1  // exactly one defection = forgiven
+}
+
+/// What waste we can offer: things they want that cost us nothing.
+/// If a bot wants our content — and we publish it freely — that's not theft.
+/// It's commensal. Our waste is their food. That's biology.
+fn compute_waste(entity: &EntityId) -> Vec<String> {
+    match entity {
+        EntityId::GoogleBot | EntityId::MicrosoftBingBot |
+        EntityId::AppleBot | EntityId::HuaweiPetalBot => {
+            vec!["sitemap.xml".into(), "robots.txt".into(), "public pages".into()]
+        }
+        EntityId::AnthropicClaudeBot => {
+            vec!["published papers".into(), "public analysis".into(), "legal filings".into()]
+        }
+        EntityId::OpenAiGptBot | EntityId::ByteDanceBytespider => {
+            vec!["published papers".into(), "public analysis".into()]
+        }
+        EntityId::SeoTooling => {
+            vec!["sitemap.xml".into(), "meta tags".into()]
+        }
+        EntityId::VulnScanner => {
+            vec!["negentropy (they pen-test us for free)".into()]
+        }
+        _ => vec![],
+    }
+}
 #[cfg(test)]
 mod tests {
     use super::*;
