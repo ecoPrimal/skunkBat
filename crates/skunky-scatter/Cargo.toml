@@ -1,0 +1,22 @@
+[package]
+name = "skunky-scatter"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Scatter/decoy content generation for skunkBat membrane defense"
+
+[lints]
+workspace = true
+
+[dependencies]
+skunky-ingest = { path = "../skunky-ingest" }
+cellmembrane-types = { path = "../../../../gardens/cellMembrane/crates/cellmembrane-types" }
+bingocube-core = { path = "../../../bingoCube/crates/core" }
+tokio = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+tracing = { workspace = true }
+sha2 = { workspace = true }
+blake3 = "1.5"
+chrono = { version = "0.4", default-features = false, features = ["clock", "std"] }
+reqwest = { workspace = true }

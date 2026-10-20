@@ -5,6 +5,7 @@ members = [
     "crates/skunk-bat-integrations",
     "crates/skunk-bat-server",
     "crates/skunky-ingest",
+    "crates/skunky-scatter",
 ]
 default-members = [
     "crates/skunk-bat-server",

@@ -1690,6 +1690,23 @@ dependencies = [
 ]
 
 [[package]]
+name = "skunky-scatter"
+version = "0.2.25"
+dependencies = [
+ "bingocube-core",
+ "blake3",
+ "cellmembrane-types",
+ "chrono",
+ "reqwest",
+ "serde",
+ "serde_json",
+ "sha2",
+ "skunky-ingest",
+ "tokio",
+ "tracing",
+]
+
+[[package]]
 name = "slab"
 version = "0.4.12"
 source = "registry+https://github.com/rust-lang/crates.io-index"
