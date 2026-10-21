@@ -499,6 +499,10 @@ impl TopologyWriter {
         // with high fleet_confidence and feed them to the registry.
         self.feed_registry(&profiles);
 
+        // Klein bottle: positive opsonization — commensals teach the membrane.
+        // Non-self behavior → self knowledge. What they read = what matters.
+        self.feed_welcome_learning(&profiles);
+
         let comparative = build_comparative(&profiles);
         let now = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
@@ -939,6 +943,174 @@ impl TopologyWriter {
         }
     }
 
+    /// Klein bottle positive opsonization: commensals teach the membrane.
+    ///
+    /// Reads the `hosts` and `path_ops` from commensal profiles (honest,
+    /// low fleet_confidence, non-trivial request count) and aggregates
+    /// them into content learning signals. Writes `commensal-learning.json`
+    /// to the live-terminal feed.
+    ///
+    /// This is the redirect: DNA (EntityProfile types) → RNA (learning feed).
+    /// What non-self reads = what self should amplify.
+    fn feed_welcome_learning(&self, profiles: &[EntityProfile]) {
+        use std::collections::BTreeMap;
+
+        // Filter for commensals: honest, low fleet_confidence, meaningful traffic
+        let commensals: Vec<&EntityProfile> = profiles
+            .iter()
+            .filter(|p| {
+                p.is_honest
+                    && p.fleet_confidence < 0.3
+                    && p.total_requests >= 3
+                    && !p.hosts.is_empty()
+            })
+            .collect();
+
+        if commensals.is_empty() {
+            return;
+        }
+
+        // Aggregate host heat across all commensals
+        let mut host_visits: BTreeMap<String, (u64, HashSet<String>)> = BTreeMap::new();
+        for p in &commensals {
+            for (host, count) in &p.hosts {
+                let entry = host_visits
+                    .entry(host.clone())
+                    .or_insert_with(|| (0, HashSet::new()));
+                entry.0 += count;
+                entry.1.insert(format!("{:?}", p.entity));
+            }
+        }
+
+        // Aggregate page heat from path_ops
+        let mut page_visits: BTreeMap<String, (u64, HashSet<String>)> = BTreeMap::new();
+        for p in &commensals {
+            for (path, count) in &p.path_ops {
+                let entry = page_visits
+                    .entry(path.clone())
+                    .or_insert_with(|| (0, HashSet::new()));
+                entry.0 += count;
+                entry.1.insert(format!("{:?}", p.entity));
+            }
+        }
+
+        // Build hot pages (top 20 by heat)
+        let mut page_heats: Vec<(String, u64, u64)> = page_visits
+            .iter()
+            .map(|(path, (visits, visitors))| {
+                (path.clone(), *visits, visitors.len() as u64)
+            })
+            .collect();
+        page_heats.sort_by(|a, b| b.1.cmp(&a.1));
+        page_heats.truncate(20);
+
+        // Build hot hosts (top 10 by traffic)
+        let mut host_heats: Vec<(String, u64, u64)> = host_visits
+            .iter()
+            .map(|(host, (visits, visitors))| {
+                (host.clone(), *visits, visitors.len() as u64)
+            })
+            .collect();
+        host_heats.sort_by(|a, b| b.1.cmp(&a.1));
+        host_heats.truncate(10);
+
+        // Content appetite: classify paths into content types
+        let mut appetite: BTreeMap<String, u64> = BTreeMap::new();
+        for p in &commensals {
+            for (path, count) in &p.path_ops {
+                let content_type = classify_content_type(path);
+                *appetite.entry(content_type).or_insert(0) += count;
+            }
+        }
+        let total_appetite: u64 = appetite.values().sum();
+        let mut appetite_ranked: Vec<(String, u64, f64)> = appetite
+            .into_iter()
+            .map(|(ct, demand)| {
+                let fraction = if total_appetite > 0 {
+                    demand as f64 / total_appetite as f64
+                } else {
+                    0.0
+                };
+                (ct, demand, fraction)
+            })
+            .collect();
+        appetite_ranked.sort_by(|a, b| b.1.cmp(&a.1));
+
+        // Build amplification signals (top 5 pages by heat × uniqueness)
+        let amplify: Vec<serde_json::Value> = page_heats
+            .iter()
+            .take(5)
+            .map(|(path, visits, unique)| {
+                let strength = (*visits as f64 * *unique as f64).sqrt()
+                    / (commensals.len() as f64).max(1.0);
+                serde_json::json!({
+                    "target": path,
+                    "strength": (strength * 1000.0).round() / 1000.0,
+                    "source": "commensal_reading",
+                    "feedback_action": if strength > 0.5 { "serve_more" } else { "campfire_story" },
+                })
+            })
+            .collect();
+
+        let now_iso = chrono::Utc::now()
+            .format("%Y-%m-%dT%H:%M:%SZ")
+            .to_string();
+
+        let learning = serde_json::json!({
+            "generated": now_iso,
+            "wave": 178,
+            "contributors": commensals.len(),
+            "hot_pages": page_heats.iter().map(|(path, visits, unique)| {
+                serde_json::json!({
+                    "path": path,
+                    "visits": visits,
+                    "unique_visitors": unique,
+                    "heat": (*visits as f64 * *unique as f64).sqrt(),
+                })
+            }).collect::<Vec<_>>(),
+            "hot_hosts": host_heats.iter().map(|(host, visits, unique)| {
+                serde_json::json!({
+                    "host": host,
+                    "visits": visits,
+                    "unique_visitors": unique,
+                })
+            }).collect::<Vec<_>>(),
+            "appetite_ranking": appetite_ranked.iter().map(|(ct, demand, frac)| {
+                serde_json::json!({
+                    "content_type": ct,
+                    "demand": demand,
+                    "fraction": (*frac * 1000.0).round() / 1000.0,
+                })
+            }).collect::<Vec<_>>(),
+            "amplification_signal": amplify,
+            "klein_bottle": "non-self behavior → self knowledge. the membrane learns from readers.",
+        });
+
+        // Write to live-terminal feed
+        let feed_path = self.state_path.parent()
+            .unwrap_or_else(|| Path::new("/opt/membrane/live-terminal"))
+            .join("commensal-learning.json");
+        match serde_json::to_string_pretty(&learning) {
+            Ok(json) => {
+                if let Err(e) = std::fs::write(&feed_path, &json) {
+                    tracing::warn!(error = %e, "failed to write commensal-learning.json");
+                } else {
+                    tracing::info!(
+                        commensals = commensals.len(),
+                        pages = page_heats.len(),
+                        hosts = host_heats.len(),
+                        amplify = amplify.len(),
+                        path = %feed_path.display(),
+                        "🔬 Klein bottle: commensal learning feed written"
+                    );
+                }
+            }
+            Err(e) => {
+                tracing::warn!(error = %e, "failed to serialize commensal-learning");
+            }
+        }
+    }
+
     /// Delegate entity count from inner builder.
     pub fn entity_count(&self) -> usize {
         self.builder.entity_count()
@@ -953,6 +1125,28 @@ impl TopologyWriter {
             path = %self.state_path.display(),
             "🧬 topology culture saved"
         );
+    }
+}
+
+/// Classify a URL path into a content type for appetite ranking.
+fn classify_content_type(path: &str) -> String {
+    let p = path.to_lowercase();
+    if p.contains("/science/") || p.contains("/paper") || p.contains(".pdf") {
+        "scientific_papers".to_string()
+    } else if p.contains("/api/") || p.contains(".json") {
+        "api_data".to_string()
+    } else if p.contains(".git") || p.contains("/diff") || p.contains("/src/") {
+        "source_code".to_string()
+    } else if p.contains("/detroit") || p.contains("/evidence") || p.contains("/tuebor") {
+        "legal_investigation".to_string()
+    } else if p.contains("/js/") || p.contains("/css/") || p.contains(".wasm") {
+        "static_assets".to_string()
+    } else if p.contains("robots.txt") || p.contains("sitemap") || p.contains(".well-known") {
+        "discovery".to_string()
+    } else if p.ends_with('/') || p.is_empty() || p == "/" {
+        "landing_page".to_string()
+    } else {
+        "content".to_string()
     }
 }
 
@@ -1043,5 +1237,17 @@ mod tests {
         assert!(content2.contains("Anthropic (ClaudeBot)"), "sourdough culture should survive restart");
 
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn content_type_classifier() {
+        assert_eq!(classify_content_type("/science/85_dead_is_food"), "scientific_papers");
+        assert_eq!(classify_content_type("/api/traces"), "api_data");
+        assert_eq!(classify_content_type("/ecoPrimals/src/main.rs"), "source_code");
+        assert_eq!(classify_content_type("/detroit/entity/123"), "legal_investigation");
+        assert_eq!(classify_content_type("/js/banana-bump.js"), "static_assets");
+        assert_eq!(classify_content_type("/robots.txt"), "discovery");
+        assert_eq!(classify_content_type("/"), "landing_page");
+        assert_eq!(classify_content_type("/banana.html"), "content");
     }
 }
