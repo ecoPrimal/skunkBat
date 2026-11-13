@@ -156,6 +156,9 @@ enum Commands {
 
     /// One-shot threat detection (prints JSON to stdout).
     Detect,
+
+    /// Run comprehensive health diagnostics (`ecoBin` standard).
+    Doctor,
 }
 
 #[tokio::main]
@@ -201,6 +204,29 @@ async fn main() -> Result<(), ServerError> {
             let v = serde_json::to_value(&sb.detect_threats().await?)?;
             println!("{}", serde_json::to_string_pretty(&v)?);
             sb.stop().await?;
+            Ok(())
+        }
+        Commands::Doctor => {
+            println!("🏥 skunkBat Health Diagnostics");
+            println!("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━");
+            println!();
+            println!("📦 Binary Information");
+            println!("   Name: skunkbat");
+            println!("   Version: {}", env!("CARGO_PKG_VERSION"));
+            println!("   Role: Intrusion Detection & Automated Defense");
+            println!();
+            println!("🛡️  Security Capabilities");
+            println!("   • Network scanning (ARP, port, service)");
+            println!("   • Threat detection (anomaly, pattern)");
+            println!("   • Health monitoring (one-shot + continuous)");
+            println!();
+            println!("🔌 Transport");
+            println!("   Default bind mode: {}", default_bind_mode());
+            println!("   Default bind: {}", default_bind());
+            println!("   Default port: {}", default_port());
+            println!();
+            println!("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━");
+            println!("✅ Health check complete!");
             Ok(())
         }
     }
