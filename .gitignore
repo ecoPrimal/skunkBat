@@ -28,6 +28,8 @@ Thumbs.db
 # Runtime data (quarantine persistence)
 /data/
 /crates/*/data/
+__pycache__/
+*.pyc
 
 # Archives (moved to ../archive)
 archive/
